@@ -2810,6 +2810,7 @@ function renderTableCommandes() {
         
         // ========== COLONNE 1: N° Dossier avec date de création ==========
         const tdDossier = document.createElement("td");
+        tdDossier.style.width = "190px";  // <- largeur fixe
         const dateCreation = cmd.date_creation_commande || cmd.created_at;
         let tooltipText = '';
         let dateDisplay = '';
@@ -3197,7 +3198,7 @@ function renderTableCommandes() {
                 html += `
                 <div style="padding:2px 4px; background:${bg}; border-radius:3px; font-size:0.65rem;">
                     <span style="font-weight:bold;">${d.fournisseur_nom}</span>
-                    <div style="font-size:0.6rem; color:#6c757d;">${datePrevis || '-'}</div>
+              
                     <input type="date" style="width:90px; font-size:0.65rem; border:1px solid #ddd; border-radius:3px; padding:2px; display:block; margin-top:2px;" 
                         value="${d.date_reception_previsionnelle || ''}"
                         onchange="window.updateFournisseurField(${cmd.id}, '${d.fournisseur_nom}', 'date_reception_previsionnelle', this.value)">

@@ -1509,7 +1509,7 @@ input[placeholder="000/2024"]:focus {
     const typeClientList = ["À définir", "Partenaire", "Nouveau prospect", "Client final", "Revendeur", "EPC"];
     const typeConsultationList = ["À définir", "Consultation Fournisseur", "Consultation", "AO","Demande partenaire", "Demande interne", "Demande budgétaire"];
     const divisionsList = ["À définir", "Projet", "O&G", "Water", "EPC", "Industrie"];
-    const partenairesListe = ["Rockwell Automation", "Sensia", "P&F", "Teledyne",  "Auma", "Smar", "Krohne", "Berthold", "Samson", "Leser", "Protego", "BS&B", "Biar", "Isoil", "Asco", "Pekos","Georgin", "Autres"];
+    const partenairesListe = ["Sofraico","Rockwell Automation", "Sensia", "P&F", "Teledyne",  "Auma", "Smar", "Krohne", "Berthold", "Samson", "Leser", "Protego", "BS&B", "Biar", "Isoil", "Asco", "Pekos","Georgin", "Autres"];
     const typePrestationList = ["Projet clé main", "Fourniture et prestation", "Installation et/ou MES", "Diagnostic/Réparation/Maintenance", "Formation Visite/Audit", "Accompagnement"];
     
     const sousDivisionsMap = {
@@ -4624,6 +4624,7 @@ async function chargerToutesDonnees() {
             d.commission_devise = d.commission_devise || "€";
             d.remarque = d.remarque || "";
             d.type_prestation = d.type_prestation || "";
+             d.date_reception = d.date_reception || null;
         }
 
         await chargerCommandes();
@@ -5640,7 +5641,8 @@ const colonnes = [
     {id:"partenaire", label:"Partenaire", width:"120px"},
     {id:"type_client", label:"Catégorie client", width:"100px"},
     {id:"client", label:"Client", width:"120px"},
-    {id:"ref_client", label:"Réf client", width:"90px"},
+    {id:"ref_client", label:"Réf client", width:"120px"},
+    {id:"date_reception", label:"Date réception", width:"120px"},
     {id:"informations_client", label:"📞 Information client", width:"200px"},  // NOUVEAU
     {id:"type_consultation", label:"Type consultation", width:"110px"},
     {id:"consultation_alloti", label:"Alloti", width:"60px"},
@@ -6035,7 +6037,7 @@ function renderLigne(tr, dossier, isParentBlocked, isSplitted) {
     // Colonnes (même ordre que dans le tableau)
     const cols = [
         "select", "ref", "type_dossier", "partenaire", "type_client", "client",
-        "ref_client", "informations_client", "type_consultation",
+        "ref_client", "date_reception","informations_client", "type_consultation",
         "consultation_alloti", "designation", "division", "sous_division", "type_prestation",
         "charge_dossier", "fournisseurs", "proforma", "marge_dossier", "commission_partenaire",
         "caution", "date_limite_depot", "etat", "ref_commande", "montant_commande",
@@ -6161,6 +6163,21 @@ function renderLigne(tr, dossier, isParentBlocked, isSplitted) {
             if (!isChildBlockedFields && peutModifier(dossier, "ref_client")) inp.onchange = (e) => mettreAJour("ref_client", e.target.value, dossier.id);
             td.appendChild(inp);
         }
+        // ... après le bloc "ref_client"
+else if (colId === "date_reception") {
+    let inp = document.createElement("input");
+    inp.type = "date";
+    inp.value = dossier.date_reception || "";
+    inp.classList.add("input-smart");
+    // Désactiver si le dossier est bloqué ou si l'utilisateur n'a pas les droits
+    if (isParentBlockedFields || !peutModifier(dossier, "date_reception")) {
+        inp.disabled = true;
+    } else {
+        inp.onchange = (e) => mettreAJour("date_reception", e.target.value, dossier.id);
+    }
+    td.appendChild(inp);
+}
+// ... avant le bloc "informations_client"
         // ==================== INFOS CLIENT ====================
         else if (colId === "informations_client") {
             if (isParentBlockedFields) {

@@ -1525,8 +1525,8 @@ input[placeholder="000/2024"]:focus {
     const sousDivisionsMap = {
         "Projet": ["O&G", "Water", "EPC", "Industrie"],
         "Water": ["Dessalement", "Assainissement", "Irrigation", "Eau potable"],
-        "O&G": ["Exploration et production", "TRC", "Raffinage & Petrochimie", "Commercialisation", "Power", "Energies renouvelables"],
-        "EPC": ["Exploration et production", "TRC", "Raffinage & Petrochimie", "Commercialisation", "Power", "Energies renouvelables"],
+        "O&G": ["Exploration et production", "TRC", "LQS", "Raffinage & Petrochimie", "Commercialisation", "Power", "Energies renouvelables"],
+        "EPC": ["Exploration et production", "TRC","LQS", "Raffinage & Petrochimie", "Commercialisation", "Power", "Energies renouvelables"],
         "Industrie": ["Agroalimentaire", "Pharma", "Materiaux", "Chimie", "Cimenterie", "Metallurgie"],
         "À définir": []
     };
@@ -4377,9 +4377,9 @@ updateTypeConsultationAllDivisionsChart(dossiersStats, division);
                 const div = document.getElementById("filterDivision").value;
                 let options = [];
                 if (div === "O&G") {
-                    options = ["Exploration et production", "TRC", "Raffinage & Petrochimie", "Commercialisation", "Power", "Energies renouvelables"];
+                    options = ["Exploration et production", "TRC", "LQS","Raffinage & Petrochimie", "Commercialisation", "Power", "Energies renouvelables"];
                 } else if (div === "EPC") {
-                    options = ["Exploration et production", "TRC", "Raffinage & Petrochimie", "Commercialisation", "Power", "Energies renouvelables"];
+                    options = ["Exploration et production", "TRC", "LQS", "Raffinage & Petrochimie", "Commercialisation", "Power", "Energies renouvelables"];
                 } else if (div === "Water") {
                     options = ["Dessalement", "Assainissement", "Irrigation", "Eau potable"];
                 } else if (div === "Projet") {
@@ -4512,7 +4512,7 @@ updateTypeConsultationAllDivisionsChart(dossiersStats, division);
         
         let options = [];
         if (division === "O&G") {
-            options = ["Exploration et production", "TRC", "Raffinage & Petrochimie", "Commercialisation", "Power", "Energies renouvelables"];
+            options = ["Exploration et production", "TRC", "LQS", "Raffinage & Petrochimie", "Commercialisation", "Power", "Energies renouvelables"];
         } else if (division === "Water") {
             options = ["Dessalement", "Assainissement", "Irrigation", "Eau potable"];
         } else if (division === "Industrie") {
@@ -4966,8 +4966,8 @@ function creerFormulaireAncien() {
     };
     
     const sousDivisionsLocal = {
-        "O&G": ["Exploration et production", "TRC", "Raffinage & Petrochimie", "Commercialisation", "Power", "Energies renouvelables"],
-        "EPC": ["Exploration et production", "TRC", "Raffinage & Petrochimie", "Commercialisation", "Power", "Energies renouvelables"],
+        "O&G": ["Exploration et production", "TRC", "LQS", "Raffinage & Petrochimie", "Commercialisation", "Power", "Energies renouvelables"],
+        "EPC": ["Exploration et production", "TRC", "LQS", "Raffinage & Petrochimie", "Commercialisation", "Power", "Energies renouvelables"],
         "Water": ["Dessalement", "Assainissement", "Irrigation", "Eau potable"],
         "Industrie": ["Agroalimentaire", "Pharma", "Chimie"],
         "Projet": ["O&G", "Water", "EPC", "Industrie"]
@@ -6464,9 +6464,9 @@ else if (colId === "date_reception") {
             let options = [];
             const divisionEffective = dossier.division || "À définir";
             if (divisionEffective === "O&G") {
-                options = ["Exploration et production", "TRC", "Raffinage & Petrochimie", "Commercialisation", "Power", "Energies renouvelables"];
+                options = ["Exploration et production", "TRC", "LQS","Raffinage & Petrochimie", "Commercialisation", "Power", "Energies renouvelables"];
             } else if (divisionEffective === "EPC") {
-                options = ["Exploration et production", "TRC", "Raffinage & Petrochimie", "Commercialisation", "Power", "Energies renouvelables"];
+                options = ["Exploration et production", "TRC", "LQS", "Raffinage & Petrochimie", "Commercialisation", "Power", "Energies renouvelables"];
             } else if (divisionEffective === "Water") {
                 options = ["Dessalement", "Assainissement", "Irrigation", "Eau potable"];
             } else if (divisionEffective === "Industrie") {

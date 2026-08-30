@@ -11446,18 +11446,32 @@ if (dossier.charge_dossier && dossier.charge_dossier !== "À définir") {
           );
         }
 
-        function installerRaccourciBureau() {
-          const url = window.location.href;
-          const batContent = `@echo off\necho Creation du raccourci\nset SCRIPT="%TEMP%\\shortcut.vbs"\necho Set oWS = WScript.CreateObject("WScript.Shell") > %SCRIPT%\necho sLinkFile = oWS.SpecialFolders("Desktop") + "\\Gestion Dossiers.url" >> %SCRIPT%\necho oLink = oWS.CreateShortcut(sLinkFile) >> %SCRIPT%\necho oLink.TargetPath = "${url}" >> %SCRIPT%\necho oLink.Save >> %SCRIPT%\ncscript /nologo %SCRIPT%\ndel %SCRIPT%\necho Raccourci cree !\ntimeout /t 3 > nul\nexit`;
-          const blob = new Blob([batContent], { type: "application/bat" });
-          const a = document.createElement("a");
-          a.href = URL.createObjectURL(blob);
-          a.download = "Installer_Raccourci_Bureau.bat";
-          a.click();
-          URL.revokeObjectURL(a.href);
-          alert("✅ Fichier téléchargé !");
-        }
+function installerRaccourciBureau() {
+    const url = window.location.href;
 
+    // Contenu du fichier batch
+    const batContent = `@echo off
+set "shortcut=%USERPROFILE%\\Desktop\\Gestion_Dossiers.url"
+echo [InternetShortcut] > "%shortcut%"
+echo URL=${url} >> "%shortcut%"
+echo IconIndex=0 >> "%shortcut%"
+echo IconFile=%%SystemRoot%%\\system32\\SHELL32.dll >> "%shortcut%"
+echo ✅ Raccourci créé sur le bureau.
+timeout /t 3 > nul
+exit`;
+
+    const blob = new Blob([batContent], { type: 'application/bat' });
+    const a = document.createElement('a');
+    a.href = URL.createObjectURL(blob);
+    a.download = 'Installer_Raccourci_Bureau.bat';
+    document.body.appendChild(a);
+    a.click();
+    document.body.removeChild(a);
+    URL.revokeObjectURL(a.href);
+
+    alert('✅ Le fichier batch a été téléchargé.\nExécutez-le (double-clic) pour créer le raccourci sur votre bureau.');
+}git
+        
         window.updateRevision = updateRevision;
         window.deleteRevision = deleteRevision;
         window.deleteFournisseurLien = deleteFournisseurLien;

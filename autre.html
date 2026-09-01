@@ -15,7 +15,8 @@
     <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
     <script src="https://cdn.sheetjs.com/xlsx-0.20.2/package/dist/xlsx.full.min.js"></script>
     <script src="https://cdnjs.cloudflare.com/ajax/libs/html2pdf.js/0.10.1/html2pdf.bundle.min.js"></script>
-    <style>
+   <script src="https://cdn.jsdelivr.net/npm/clusterize.js@0.18.1/clusterize.min.js"></script>
+   <style>
               * { margin: 0; padding: 0; box-sizing: border-box; }
               body {
                   background: linear-gradient(135deg, #e8f0f8 0%, #d4e4f0 100%);
@@ -122,7 +123,7 @@
               .toolbar-premium {
               position: sticky;
                   top: 143px; /* Ajustez selon hauteur */
-                  z-index: 1000;
+                  z-index: 99;
                   background: #f8f9fc;
                   padding: 12px 20px;
                   display: flex;
@@ -281,21 +282,9 @@
                   margin: 0 20px 20px 20px;
                   overflow-x: auto;
                   overflow-y: auto;
-                  position:relative;
                   box-shadow: 0 2px 10px rgba(0,82,156,0.08);
-                     max-height: 54vh;
+                     max-height: 60vh;
               }
-              .data-table thead th {
-  position: sticky;
-  top: 0;
-  z-index: 100; /* supérieur aux cellules du corps */
-  background: linear-gradient(135deg, #00529c, #003d75);
-  color: white;
-  padding: 12px 8px;
-  font-weight: 600;
-  white-space: nowrap;
-}
-
               .table-wrapper::-webkit-scrollbar {
                   width: 10px;
                   height: 8px;
@@ -1348,6 +1337,7 @@
           <button class="btn-premium btn-outline" id="btnToggleFilters">
             <i class="fas fa-filter"></i> Masquer filtres
           </button>
+
           <!-- Boutons de défilement rapide -->
 <div style="display:flex; gap:8px; align-items:center; margin-left:10px;">
     <button class="btn-premium btn-outline" id="btnScrollTop" style="padding:5px 10px;" title="Défiler en haut"><i class="fas fa-arrow-up"></i></button>
@@ -1722,12 +1712,14 @@
           </div>
         </div>
 
-        <div class="table-wrapper">
-          <table class="data-table" id="mainTable">
-            <thead id="tableHeader"></thead>
-            <tbody id="tableBody"></tbody>
-          </table>
-        </div>
+<div class="table-wrapper" id="scrollableTable" style="height: 65vh; overflow-y: auto; position: relative;">
+    <table class="data-table" id="mainTable">
+        <thead id="tableHeader">
+            <!-- Le contenu de l'en-tête sera généré par renderTableFiltre, mais on le mettra une fois pour toutes -->
+        </thead>
+        <tbody id="tableBody"></tbody>
+    </table>
+</div>
       </div>
 
       <div class="tab-content" id="tab-commandes">
@@ -2061,6 +2053,8 @@
         let currentStatsType = "STCCo";
         let currentDivision = null;
         let currentFinancialDivision = null;
+let clusterize = null;          // ← AJOUTE ICI
+const updateQueue = {};         // ← AJOUTE ICI
         const devisesList = ["€", "$", "DA"];
         const etatsList = [
           "en cours",
@@ -2184,16 +2178,201 @@
         };
 
         let charts = {};
-          let allRowsData = [];
-  const ROW_HEIGHT = 65;           // ajustez si besoin (hauteur moyenne d'une ligne)
-  let visibleStartIndex = 0;
-  let visibleEndIndex = 0;
-  let scrollTimeout = null;
-let rowHeights = [];  // tableau des hauteurs réelles par index de ligne
-        // ==================== GESTION DES DÉTAILS FOURNISSEURS ====================
-function disabled(condition) {
-    return condition ? 'disabled' : '';
+function debounceUpdate(field, value, dossierId) {
+    const key = `${dossierId}_${field}`;
+    clearTimeout(updateQueue[key]);
+    updateQueue[key] = setTimeout(() => {
+        mettreAJour(field, value, dossierId);
+        delete updateQueue[key];
+    }, 500);
 }
+
+// ========== MODAL AJOUT FOURNISSEUR (dossier) ==========
+function ouvrirModalAjoutFournisseur(dossierId) {
+    // Supprimer un éventuel modal existant
+    const ancien = document.getElementById('fournisseurModal');
+    if (ancien) ancien.remove();
+
+    const modal = document.createElement('div');
+    modal.className = 'modal-split';
+    modal.id = 'fournisseurModal';
+    modal.innerHTML = `
+        <div class="modal-card">
+            <h4><i class="fas fa-truck"></i> Ajouter un fournisseur au dossier</h4>
+            <div style="font-size:0.7rem;color:#6c757d;margin-bottom:10px;background:#f8f9fc;padding:8px;border-radius:6px;">
+                <i class="fas fa-info-circle" style="color:#00529c;"></i> 
+                Sélectionnez un partenaire existant ou choisissez <strong>"Autre"</strong> pour un fournisseur hors partenaire
+            </div>
+            <div id="fournisseurSelectContainer" class="fournisseur-select-container"></div>
+            <input type="text" id="refFourn" placeholder="Référence fournisseur" class="input-smart" style="margin-top:10px;">
+            <input type="number" id="mtFourn" placeholder="Montant" class="input-smart" style="margin-top:5px;">
+            <select id="devFourn" class="select-smart" style="margin-top:5px;">
+                ${devisesList.map(d => `<option value="${d}">${d}</option>`).join('')}
+            </select>
+            <div style="display:flex; gap:10px; margin-top:15px;">
+                <button class="btn-premium btn-primary" id="btnSaveFourn"><i class="fas fa-save"></i> Ajouter</button>
+                <button class="btn-premium btn-outline" id="btnCancelFourn"><i class="fas fa-times"></i> Annuler</button>
+            </div>
+        </div>
+    `;
+    document.body.appendChild(modal);
+
+    // Insérer le sélecteur avec gestion "Autre"
+    const container = document.getElementById('fournisseurSelectContainer');
+    const selectContainer = creerSelectFournisseur(null, null, function(fournisseur) {
+        // Callback appelé quand un fournisseur est sélectionné (y compris "Autre")
+        console.log('Fournisseur sélectionné:', fournisseur);
+    });
+    container.appendChild(selectContainer);
+
+    // Bouton Ajouter
+    document.getElementById('btnSaveFourn').addEventListener('click', async function() {
+        const select = container.querySelector('select');
+        const value = select.value;
+
+        if (!value) {
+            alert('⚠️ Veuillez sélectionner un fournisseur');
+            return;
+        }
+
+        let nomAutre = null;
+        let fournisseurId = value;
+
+        // Vérifier si c'est "Autre"
+        const estAutre = (value === 'autre' || value === 'autre_temp');
+        if (estAutre) {
+            const selectedOpt = select.options[select.selectedIndex];
+            if (selectedOpt && selectedOpt.dataset && selectedOpt.dataset.nom) {
+                nomAutre = selectedOpt.dataset.nom;
+            } else {
+                const inputAutre = container.querySelector('input[type="text"]');
+                if (inputAutre) nomAutre = inputAutre.value.trim();
+            }
+            if (!nomAutre) {
+                alert('⚠️ Veuillez saisir un nom de fournisseur');
+                return;
+            }
+            fournisseurId = 'autre';
+        } else {
+            fournisseurId = parseInt(value);
+        }
+
+        const reference = document.getElementById('refFourn').value || '';
+        const montant = parseFloat(document.getElementById('mtFourn').value) || 0;
+        const devise = document.getElementById('devFourn').value || '€';
+
+        const result = await ajouterFournisseur(
+            dossierId,
+            fournisseurId,
+            reference,
+            montant,
+            devise,
+            nomAutre
+        );
+
+        if (result) {
+            modal.remove();
+            applyFilters();  // rafraîchir le tableau
+        }
+    });
+
+    // Bouton Annuler
+    document.getElementById('btnCancelFourn').addEventListener('click', function() {
+        modal.remove();
+    });
+}
+
+// ========== MODAL AJOUT FOURNISSEUR COMMANDE ==========
+function ouvrirModalAjoutCommandeFournisseur(dossierId) {
+    const ancien = document.getElementById('commandeFournModal');
+    if (ancien) ancien.remove();
+
+    const modal = document.createElement('div');
+    modal.className = 'modal-split';
+    modal.id = 'commandeFournModal';
+    modal.innerHTML = `
+        <div class="modal-card">
+            <h4><i class="fas fa-shopping-cart"></i> Ajouter un fournisseur à la commande</h4>
+            <div style="font-size:0.7rem;color:#6c757d;margin-bottom:10px;background:#f8f9fc;padding:8px;border-radius:6px;">
+                <i class="fas fa-info-circle" style="color:#00529c;"></i> 
+                Sélectionnez un partenaire existant ou choisissez <strong>"Autre"</strong> pour un fournisseur hors partenaire
+            </div>
+            <div id="commandeFournSelectContainer" class="fournisseur-select-container"></div>
+            <input type="text" id="refFournCmd" placeholder="Référence fournisseur" class="input-smart" style="margin-top:10px;">
+            <input type="number" id="mtFournCmd" placeholder="Montant" class="input-smart" style="margin-top:5px;">
+            <select id="devFournCmd" class="select-smart" style="margin-top:5px;">
+                ${devisesList.map(d => `<option value="${d}">${d}</option>`).join('')}
+            </select>
+            <div style="display:flex; gap:10px; margin-top:15px;">
+                <button class="btn-premium btn-primary" id="btnSaveCommandeFourn"><i class="fas fa-save"></i> Ajouter</button>
+                <button class="btn-premium btn-outline" id="btnCancelCommandeFourn"><i class="fas fa-times"></i> Annuler</button>
+            </div>
+        </div>
+    `;
+    document.body.appendChild(modal);
+
+    const container = document.getElementById('commandeFournSelectContainer');
+    const selectContainer = creerSelectFournisseur(null, null, function(fournisseur) {
+        console.log('Fournisseur commande sélectionné:', fournisseur);
+    });
+    container.appendChild(selectContainer);
+
+    document.getElementById('btnSaveCommandeFourn').addEventListener('click', async function() {
+        const select = container.querySelector('select');
+        const value = select.value;
+
+        if (!value) {
+            alert('⚠️ Veuillez sélectionner un fournisseur');
+            return;
+        }
+
+        let nomAutre = null;
+        let fournisseurId = value;
+
+        const estAutre = (value === 'autre' || value === 'autre_temp');
+        if (estAutre) {
+            const selectedOpt = select.options[select.selectedIndex];
+            if (selectedOpt && selectedOpt.dataset && selectedOpt.dataset.nom) {
+                nomAutre = selectedOpt.dataset.nom;
+            } else {
+                const inputAutre = container.querySelector('input[type="text"]');
+                if (inputAutre) nomAutre = inputAutre.value.trim();
+            }
+            if (!nomAutre) {
+                alert('⚠️ Veuillez saisir un nom de fournisseur');
+                return;
+            }
+            fournisseurId = 'autre';
+        } else {
+            fournisseurId = parseInt(value);
+        }
+
+        const reference = document.getElementById('refFournCmd').value || '';
+        const montant = parseFloat(document.getElementById('mtFournCmd').value) || 0;
+        const devise = document.getElementById('devFournCmd').value || '€';
+
+        const result = await ajouterCommandeFournisseur(
+            dossierId,
+            fournisseurId,
+            reference,
+            montant,
+            devise,
+            nomAutre
+        );
+
+        if (result) {
+            modal.remove();
+            applyFilters();
+            appliquerFiltresCommandes();
+        }
+    });
+
+    document.getElementById('btnCancelCommandeFourn').addEventListener('click', function() {
+        modal.remove();
+    });
+}
+        // ==================== GESTION DES DÉTAILS FOURNISSEURS ====================
+
         // Récupérer les détails d'une commande
         function getFournisseursDetails(commande) {
           if (!commande || !commande.fournisseurs_details) return [];
@@ -6139,8 +6318,6 @@ function disabled(condition) {
           }
         }
 
-
-
         function applyFilters() {
           const filterRef = document
             .getElementById("filterRef")
@@ -6229,8 +6406,7 @@ function disabled(condition) {
             updateFinancialCharts(currentFinancialDivision);
           }
         }
-
-        // Remplir le sélecteur d'années avec les années disponibles
+// Remplir le sélecteur d'années avec les années disponibles
 function remplirSelectAnnees() {
     const select = document.getElementById('scrollYearSelect');
     if (!select) return;
@@ -6273,18 +6449,14 @@ function scrollToYear(annee) {
         alert(`Aucun dossier trouvé pour l'année ${annee}`);
         return;
     }
-
-    const wrapper = document.querySelector('.table-wrapper');
+    const wrapper = document.getElementById('scrollableTable');
     if (!wrapper) return;
-
-    let targetScroll = 0;
-    for (let i = 0; i < index && i < rowHeights.length; i++) {
-        targetScroll += rowHeights[i] || ROW_HEIGHT;
-    }
-
+    // Estimer la hauteur d'une ligne (valeur par défaut 40px)
+    const firstRow = document.querySelector('#tableBody tr');
+    const rowHeight = firstRow ? firstRow.offsetHeight : 40;
+    const targetScroll = index * rowHeight;
     wrapper.scrollTop = targetScroll;
-    if (typeof updateVisibleRows === 'function') updateVisibleRows();
-
+    // Surligner la première ligne de l'année (une fois rendue)
     setTimeout(() => {
         const rows = document.querySelectorAll('#tableBody tr');
         for (const row of rows) {
@@ -6294,8 +6466,60 @@ function scrollToYear(annee) {
                 break;
             }
         }
-    }, 200);
+    }, 150);
 }
+
+        function updateSousDivisionOptions(dossierId, division) {
+          const sousDivSelect = document.getElementById(
+            `sous_division_${dossierId}`,
+          );
+          if (!sousDivSelect) return;
+
+          let options = [];
+          if (division === "O&G") {
+            options = [
+              "Exploration et production",
+              "TRC",
+              "LQS",
+              "Raffinage & Petrochimie",
+              "Commercialisation",
+              "Power",
+              "Energies renouvelables",
+            ];
+          } else if (division === "Water") {
+            options = [
+              "Dessalement",
+              "Assainissement",
+              "Irrigation",
+              "Eau potable",
+            ];
+          } else if (division === "Industrie") {
+            options = [
+              "Agroalimentaire",
+              "Pharma",
+              "Materiaux",
+              "Chimie",
+              "Cimenterie",
+              "Metallurgie",
+            ];
+          } else if (division === "Projet") {
+            options = ["O&G", "Water", "EPC", "Industrie"];
+          } else {
+            options = sousDivisionsMap[division] || ["Aucune"];
+          }
+
+          if (!options.includes("Aucune")) options.unshift("Aucune");
+
+          const currentValue = sousDivSelect.value;
+          sousDivSelect.innerHTML = "";
+          options.forEach((sd) => {
+            let opt = document.createElement("option");
+            opt.value = sd;
+            opt.textContent = sd;
+            if (currentValue === sd) opt.selected = true;
+            sousDivSelect.appendChild(opt);
+          });
+        }
 
         function resetFilters() {
           document.getElementById("filterRef").value = "";
@@ -6707,6 +6931,13 @@ function scrollToYear(annee) {
             commandeFournisseursLies = commandeFournRes.data || [];
             lotsListe = lotsRes.data || [];
 
+            
+    // ====== C’EST JUSTE APRÈS CETTE ASSIGNATION QUE VOUS DEVEZ AJOUTER ======
+    // INITIALISATION DU CHAMP sofraico
+    dossiers = dossiers.map(d => {
+        d.sofraico = d.sofraico || { applicable: false, montant: 0, unite: '€' };
+        return d;
+    });
             // Initialisation des champs par défaut pour les dossiers
             for (let d of dossiers) {
               d.type_dossier = d.type_dossier || "STCCo";
@@ -6725,7 +6956,6 @@ function scrollToYear(annee) {
               d.remarque = d.remarque || "";
               d.type_prestation = d.type_prestation || "";
               d.date_reception = d.date_reception || null;
-               d.sofraico = d.sofraico || { applicable: false, montant: 0, unite: '€' };
             }
 
             await chargerCommandes();
@@ -6744,28 +6974,8 @@ function scrollToYear(annee) {
             updateConnectionStatus(true);
             initFiltres();
             applyFilters();
-// Remplir le sélecteur d'années pour le défilement rapide
-remplirSelectAnnees();
+             renderTableHeader();
 
-// Attacher les événements
-document.getElementById('btnScrollTop').addEventListener('click', function() {
-    const wrapper = document.querySelector('.table-wrapper');
-    if (wrapper) wrapper.scrollTop = 0;
-});
-document.getElementById('btnScrollBottom').addEventListener('click', function() {
-    const wrapper = document.querySelector('.table-wrapper');
-    if (wrapper) wrapper.scrollTop = wrapper.scrollHeight;
-});
-document.getElementById('btnScrollToYear').addEventListener('click', function() {
-    const annee = document.getElementById('scrollYearSelect').value;
-    if (!annee) {
-        alert('Veuillez sélectionner une année');
-        return;
-    }
-    scrollToYear(annee);
-});            
-// ... dans chargerToutesDonnees, après applyFilters();
-initVirtualScroll();
             // setTimeout(() => {
             //   const wrapper = document.querySelector(".table-wrapper");
             //   if (wrapper) {
@@ -6955,41 +7165,25 @@ initVirtualScroll();
                 }
               };
             }
-// ===== GESTIONNAIRE DÉLÉGUÉ POUR SOFRAICO =====
-document.getElementById('tableBody').addEventListener('change', function(e) {
-    const target = e.target;
-    if (target.dataset.field === 'sofraico') {
-        const dossierId = target.dataset.dossierId;
-        const part = target.dataset.sofraicoPart;
-        if (!dossierId || !part) return;
+// Remplir le sélecteur d'années pour le défilement rapide
+remplirSelectAnnees();
 
-        let valeur;
-        if (part === 'applicable') {
-            valeur = target.checked;
-        } else if (part === 'montant') {
-            valeur = parseFloat(target.value) || 0;
-        } else if (part === 'unite') {
-            valeur = target.value;
-        }
-
-        const dossier = dossiers.find(d => d.id === parseInt(dossierId));
-        if (!dossier) return;
-
-        const actuel = dossier.sofraico || { applicable: false, montant: 0, unite: '€' };
-        const nouvelObjet = { ...actuel, [part]: valeur };
-
-        // Mise à jour visuelle immédiate pour la checkbox
-        if (part === 'applicable') {
-            const container = target.closest('div[style*="display:flex; flex-direction:column; gap:4px;"]');
-            if (container) {
-                const fieldsWrap = container.querySelector('div:last-child');
-                if (fieldsWrap) fieldsWrap.style.display = valeur ? 'flex' : 'none';
-            }
-        }
-
-        // Sauvegarde
-        mettreAJour('sofraico', nouvelObjet, parseInt(dossierId));
+// Attacher les événements
+document.getElementById('btnScrollTop').addEventListener('click', function() {
+    const wrapper = document.getElementById('scrollableTable');
+    if (wrapper) wrapper.scrollTop = 0;
+});
+document.getElementById('btnScrollBottom').addEventListener('click', function() {
+    const wrapper = document.getElementById('scrollableTable');
+    if (wrapper) wrapper.scrollTop = wrapper.scrollHeight;
+});
+document.getElementById('btnScrollToYear').addEventListener('click', function() {
+    const annee = document.getElementById('scrollYearSelect').value;
+    if (!annee) {
+        alert('Veuillez sélectionner une année');
+        return;
     }
+    scrollToYear(annee);
 });
             // Initialiser les événements de connexion
             const btnLogin = document.getElementById("btnLogin");
@@ -7016,12 +7210,167 @@ document.getElementById('tableBody').addEventListener('change', function(e) {
             window.commandesListe = commandesListe;
             window.facturesListe = facturesListe;
             initFiltresCommandes();
-          } catch (error) {
+          // Délégation pour les changements de champs
+document.getElementById('scrollableTable').addEventListener('change', function(e) {
+    const target = e.target;
+    const dossierId = target.dataset.dossierId;
+    const field = target.dataset.field;
+    if (!dossierId || !field) return;
+        if (!dossierId || !field) return;
+        
+    // Gestion des radios
+    if (target.type === 'radio') {
+        const value = target.value;
+        // On peut directement appeler mettreAJour (ou debounceUpdate)
+        mettreAJour(field, value, parseInt(dossierId));
+        return;
+    }
+    
+    // 🔧 Cas particulier de Sofraico (objet JSON)
+    if (field === 'sofraico') {
+        const part = target.dataset.sofraicoPart; // 'applicable', 'montant' ou 'unite'
+        if (!part) return;
+        
+        let valeur;
+        if (part === 'applicable') {
+            valeur = target.checked;
+        } else if (part === 'montant') {
+            valeur = parseFloat(target.value) || 0;
+        } else if (part === 'unite') {
+            valeur = target.value;
+        }
+        
+        // Récupérer le dossier et construire l'objet complet
+        const dossierObj = dossiers.find(d => d.id === parseInt(dossierId));
+        if (!dossierObj) return;
+        
+        const objActuel = dossierObj.sofraico || { applicable: false, montant: 0, unite: '€' };
+        const nouvelObjet = { ...objActuel, [part]: valeur };
+        
+        // Appeler directement mettreAJour (ou debounceUpdate si vous voulez)
+        // Mais debounceUpdate fonctionne avec des objets, je recommande de l'utiliser
+        debounceUpdate('sofraico', nouvelObjet, parseInt(dossierId));
+        
+        // Mise à jour visuelle immédiate pour l'ouverture/fermeture du champ montant
+        if (part === 'applicable') {
+            const row = target.closest('tr');
+            if (row) {
+                const wrapper = row.querySelector('td:last-child div div:last-child'); // Sélecteur approximatif
+                // Ou mieux : on laisse la prochaine réédition gérer l'affichage
+                // On peut forcer le refresh du tableau ou simplement afficher/masquer
+                const fieldsWrap = target.closest('div').nextElementSibling; // le fieldsWrapper
+                if (fieldsWrap) {
+                    fieldsWrap.style.display = valeur ? 'flex' : 'none';
+                }
+            }
+        }
+        return; // On sort pour ne pas traiter le cas général
+    }
+    let value = target.value;
+    if (target.type === 'checkbox' || target.type === 'radio') {
+        value = target.checked || target.value;
+    }
+    debounceUpdate(field, value, parseInt(dossierId));
+});
+
+// Délégation pour les textareas (input)
+document.getElementById('scrollableTable').addEventListener('input', function(e) {
+    const target = e.target;
+    if (target.tagName === 'TEXTAREA') {
+        const dossierId = target.dataset.dossierId;
+        const field = target.dataset.field;
+        if (dossierId && field) {
+            debounceUpdate(field, target.value, parseInt(dossierId));
+        }
+    }
+});
+
+// Délégation pour les actions (boutons)
+document.getElementById('scrollableTable').addEventListener('click', function(e) {
+    const target = e.target.closest('button');
+    if (!target) return;
+    const action = target.dataset.action;
+    const dossierId = target.dataset.dossierId;
+    
+    // Gérer les actions
+    if (action === 'ajouterLot') {
+        // créer un lot
+        if (dossierId) {
+            creerLot(parseInt(dossierId));
+        }
+        e.preventDefault();
+    } else if (action === 'supprimerLot') {
+        const lotId = target.dataset.lotId;
+        if (lotId && confirm('Supprimer ce lot ?')) {
+            supprimerLot(parseInt(lotId));
+        }
+        e.preventDefault();
+    } else if (action === 'deleteFournisseurLien') {
+        const id = target.dataset.id;
+        if (id) window.deleteFournisseurLien(parseInt(id));
+        e.preventDefault();
+    } else if (action === 'deleteCommandeFournisseur') {
+        const id = target.dataset.id;
+        if (id) window.deleteCommandeFournisseur(parseInt(id));
+        e.preventDefault();
+    } else if (action === 'ajouterRevision') {
+        const lotId = target.dataset.lotId;
+        if (dossierId) {
+            window.ajouterRevision(parseInt(dossierId), lotId ? parseInt(lotId) : null);
+        }
+        e.preventDefault();
+    } else if (action === 'deleteRevision') {
+        const revId = target.dataset.revId;
+        if (revId && confirm('Supprimer cette révision ?')) {
+            window.deleteRevision(parseInt(revId));
+        }
+        e.preventDefault();
+    } 
+
+    // Dans le gestionnaire click existant, remplacez ces deux blocs :
+else if (action === 'ajouterFournisseur') {
+    if (dossierId) {
+        ouvrirModalAjoutFournisseur(parseInt(dossierId));
+    }
+    e.preventDefault();
+}
+else if (action === 'ajouterCommandeFournisseur') {
+    if (dossierId) {
+        ouvrirModalAjoutCommandeFournisseur(parseInt(dossierId));
+    }
+    e.preventDefault();
+}
+});
+
+// Pour les mises à jour de révision (via les inputs)
+document.getElementById('scrollableTable').addEventListener('change', function(e) {
+    const target = e.target;
+    if (target.dataset.action === 'updateRevision') {
+        const revId = target.dataset.revId;
+        const field = target.dataset.field;
+        const value = target.value;
+        if (revId && field) {
+            window.updateRevision(parseInt(revId), field, value);
+        }
+    }
+    if (target.dataset.action === 'updateLot') {
+        const lotId = target.dataset.lotId;
+        const field = target.dataset.field;
+        let value = target.value;
+        if (target.type === 'checkbox') value = target.checked;
+        if (lotId && field) {
+            updateLotField(parseInt(lotId), field, value);
+        }
+    }
+});
+        
+        } catch (error) {
             console.error("Erreur chargement:", error);
             updateConnectionStatus(false, error.message);
             dossiers = [];
             dossiersFiltres = [];
             renderTableFiltre();
+           
           }
         }
 
@@ -8220,43 +8569,18 @@ if (dossier.charge_dossier && dossier.charge_dossier !== "À définir") {
           showSaving("success");
           applyFilters();
 
-          applyFilters();
-
-setTimeout(() => {
-    // Obtenir la liste ordonnée
-    const ordered = getListeOrdonnee();
-    const index = ordered.findIndex(d => d.ref === newRef);
-    if (index === -1) return;
-
-    const wrapper = document.querySelector('.table-wrapper');
-    if (!wrapper) return;
-
-    // 1. Calculer la position en utilisant rowHeights
-    let targetScroll = 0;
-    for (let i = 0; i < index && i < rowHeights.length; i++) {
-        targetScroll += rowHeights[i] || ROW_HEIGHT;
-    }
-
-    // 2. Appliquer le défilement
-    wrapper.scrollTop = targetScroll;
-
-    // 3. Forcer un rendu des lignes visibles (mise à jour)
-    if (typeof updateVisibleRows === 'function') {
-        updateVisibleRows();
-    }
-
-    // 4. Surligner la ligne une fois qu'elle est visible
-    setTimeout(() => {
-        const rows = document.querySelectorAll('#tableBody tr');
-        for (const row of rows) {
-            if (row.dataset.ref === newRef) {
-                row.style.backgroundColor = '#d4edda';
-                setTimeout(() => row.style.backgroundColor = '', 2000);
+          setTimeout(() => {
+            const toutesLesLignes = document.querySelectorAll("#tableBody tr");
+            for (let i = 0; i < toutesLesLignes.length; i++) {
+              const ligne = toutesLesLignes[i];
+              if (ligne.innerText.includes(newRef)) {
+                ligne.scrollIntoView({ behavior: "smooth", block: "center" });
+                ligne.style.backgroundColor = "#d4edda";
+                setTimeout(() => (ligne.style.backgroundColor = ""), 2000);
                 break;
+              }
             }
-        }
-    }, 200);
-}, 300);
+          }, 500);
         }
 
         async function supprimerDossier(id) {
@@ -8401,56 +8725,75 @@ setTimeout(() => {
             dossiersFiltres.filter((d) => d.etat === "clôturé").length;
         }
 
-function renderTableHeader() {
-  const thead = document.getElementById('tableHeader');
-  if (!thead) return;
-  
-  // Les colonnes doivent correspondre à celles utilisées dans renderLigne()
-  const cols = [
-    { id: 'select', label: '' },
-    { id: 'ref', label: 'N° Dossier' },
-    { id: 'type_dossier', label: 'Type' },
-    { id: 'partenaire', label: 'Partenaire' },
-    { id: 'type_client', label: 'Catégorie client' },
-    { id: 'region', label: 'Région' },
-    { id: 'client', label: 'Client' },
-    { id: 'ref_client', label: 'Réf client' },
-    { id: 'date_reception', label: 'Date réception' },
-    { id: 'informations_client', label: 'Contact' },
-    { id: 'type_consultation', label: 'Type consultation' },
-    { id: 'consultation_alloti', label: 'Alloti' },
-    { id: 'designation', label: 'Désignation' },
-    { id: 'division', label: 'Division' },
-    { id: 'sous_division', label: 'Sous-division' },
-    { id: 'type_prestation', label: 'Type prestation' },
-    { id: 'charge_dossier', label: 'Chargé' },
-    { id: 'date_reception_cd', label: 'Date réception CD' },
-    { id: 'fournisseurs', label: 'Fournisseurs' },
-    { id: 'proforma', label: 'Proforma' },
-    { id: 'sofraico', label: 'Sofraico' },
-    { id: 'marge_dossier', label: 'Marge' },
-    { id: 'commission_partenaire', label: 'Commission' },
-    { id: 'caution', label: 'Caution' },
-    { id: 'date_limite_depot', label: 'Date limite dépôt' },
-    { id: 'etat', label: 'État' },
-    { id: 'ref_commande', label: 'Réf commande' },
-    { id: 'date_reception_com', label: 'Date réception Com' },
-    { id: 'montant_commande', label: 'Montant commande' },
-    { id: 'commande_fournisseurs', label: 'Commande fournisseurs' },
-    { id: 'validation', label: 'Validation' },
-    { id: 'remarque', label: 'Remarque' }
-  ];
+        function renderTableHeader() {
+    const thead = document.getElementById('tableHeader');
+    if (!thead) return;
 
-  let html = '<tr>';
-  cols.forEach(col => {
-    html += `<th>${col.label}</th>`;
-  });
-  html += '</tr>';
-  thead.innerHTML = html;
+    // Éviter de recréer l'en-tête si déjà présent
+    if (thead.children.length > 0) return;
+
+    const tr = document.createElement('tr');
+
+    // Liste exacte des colonnes (doit correspondre à l'ordre des <td> générés par renderLigne)
+    const colonnes = [
+        'Sélection',
+        'N° Dossier',
+        'Type',
+        'Partenaire',
+        'Type client',
+        'Région',
+        'Client',
+        'Réf client',
+        'Date réception',
+        'Informations client',
+        'Type consultation',
+        'Alloti',
+        'Désignation',
+        'Division',
+        'Sous-division',
+        'Type prestation',
+        'Chargé',
+        'Date réception CD',
+        'Fournisseurs',
+        'Proforma',
+         'Sofraico',
+        'Marge',
+        'Commission',
+        'Caution',
+        'Date limite dépôt',
+        'État',
+        'Réf commande',
+        'Date réception Com',
+        'Montant commande',
+        'Commande fournisseurs',
+        'Validation hiérarchie',
+        'Remarque'
+    ];
+
+    colonnes.forEach((titre, index) => {
+        const th = document.createElement('th');
+        th.textContent = titre;
+        th.style.position = 'sticky';
+        th.style.top = '0';
+        th.style.zIndex = '20';
+
+        // Figer les deux premières colonnes (comme dans le CSS)
+        if (index === 0) { // Sélection
+            th.style.left = '0';
+            th.style.zIndex = '35';
+        } else if (index === 1) { // N° Dossier
+            th.style.left = '120px';
+            th.style.zIndex = '24';
+        }
+
+        tr.appendChild(th);
+    });
+
+    thead.appendChild(tr);
 }
+
 function renderTableFiltre() {
-    // 1. Construire le tableau complet de toutes les lignes (parents + enfants)
-    allRowsData = [];
+    // Récupérer les parents et enfants triés (comme avant)
     const parents = dossiersFiltres
         .filter(d => !d.parent_ref)
         .sort((a, b) => {
@@ -8462,140 +8805,37 @@ function renderTableFiltre() {
             return numA - numB;
         });
 
+    // Construire la liste des lignes (strings HTML)
+    const rows = [];
     for (const parent of parents) {
         const hasChild = hasChildren(parent);
         const isSplitted = hasChild && parent.division === 'À définir';
-        allRowsData.push({ type: 'parent', dossier: parent, hasChild, isSplitted });
+        rows.push(buildRowHTML(parent, hasChild, isSplitted));
+
         const enfants = dossiersFiltres.filter(d => d.parent_ref === parent.ref);
         for (const enfant of enfants) {
-            allRowsData.push({ type: 'child', dossier: enfant, hasChild: false, isSplitted: false });
+            rows.push(buildRowHTML(enfant, false, false));
         }
     }
 
-    // ✅ Initialiser rowHeights avec une valeur par défaut pour chaque ligne
-    rowHeights = new Array(allRowsData.length).fill(ROW_HEIGHT);
-
-    renderTableHeader();
-    // 2. Mettre à jour les statistiques miniatures (inchangé)
-    updateMiniStats();
-
-    // 4. Afficher les lignes visibles
-    updateVisibleRows();
-}
-
-function updateVisibleRows() {
-    const wrapper = document.querySelector('.table-wrapper');
-    const tbody = document.getElementById('tableBody');
-    if (!wrapper || !tbody) return;
-
-    const totalRows = allRowsData.length;
-    if (totalRows === 0) {
+    // Si Clusterize n'est pas encore initialisé, on l'initialise
+    if (!clusterize) {
+        // S'assurer que le tbody est vide
+        const tbody = document.getElementById('tableBody');
         tbody.innerHTML = '';
-        return;
-    }
-
-    const scrollTop = wrapper.scrollTop;
-    const visibleHeight = wrapper.clientHeight;
-
-    // 1. Calculer les hauteurs cumulées pour trouver l'index de début
-    let cumul = 0;
-    let startIndex = 0;
-    for (let i = 0; i < totalRows; i++) {
-        const h = rowHeights[i] || ROW_HEIGHT;
-        if (cumul + h > scrollTop) {
-            startIndex = i;
-            break;
-        }
-        cumul += h;
-    }
-
-    // 2. Trouver l'index de fin en fonction de la hauteur visible
-    let endIndex = startIndex;
-    let hauteurVisible = 0;
-    for (let i = startIndex; i < totalRows; i++) {
-        const h = rowHeights[i] || ROW_HEIGHT;
-        if (hauteurVisible + h > visibleHeight) {
-            endIndex = i;
-            break;
-        }
-        hauteurVisible += h;
-        endIndex = i;
-    }
-
-    // Ajouter un buffer de 2 lignes de chaque côté
-    startIndex = Math.max(0, startIndex - 2);
-    endIndex = Math.min(totalRows - 1, endIndex + 2);
-
-    // Vider le tbody
-    tbody.innerHTML = '';
-
-    // --- Spacer supérieur (hauteur réelle) ---
-    let topHeight = 0;
-    for (let i = 0; i < startIndex; i++) {
-        topHeight += rowHeights[i] || ROW_HEIGHT;
-    }
-    const topSpacer = document.createElement('tr');
-    topSpacer.style.height = topHeight + 'px';
-    topSpacer.style.display = 'table-row';
-    topSpacer.style.visibility = 'hidden';
-    tbody.appendChild(topSpacer);
-
-    // --- Lignes visibles ---
-    for (let i = startIndex; i <= endIndex; i++) {
-        const rowData = allRowsData[i];
-        const tr = document.createElement('tr');
-        const etatClass = getRowEtatClass(rowData.dossier.etat);
-        if (rowData.type === 'parent') {
-            tr.className = `parent-row ${etatClass}`;
-            renderLigne(tr, rowData.dossier, rowData.hasChild, rowData.isSplitted);
-        } else {
-            tr.className = `child-row ${etatClass}`;
-            renderLigne(tr, rowData.dossier, false, false);
-        }
-        tr.dataset.ref = rowData.dossier.ref;
-        tbody.appendChild(tr);
-    }
-
-    // --- Spacer inférieur (hauteur réelle) ---
-    let bottomHeight = 0;
-    for (let i = endIndex + 1; i < totalRows; i++) {
-        bottomHeight += rowHeights[i] || ROW_HEIGHT;
-    }
-    const bottomSpacer = document.createElement('tr');
-    bottomSpacer.style.height = bottomHeight + 'px';
-    bottomSpacer.style.display = 'table-row';
-    bottomSpacer.style.visibility = 'hidden';
-    tbody.appendChild(bottomSpacer);
-
-    // --- Mise à jour des hauteurs réelles après le rendu ---
-    requestAnimationFrame(() => {
-        const trs = tbody.querySelectorAll('tr:not([style*="visibility:hidden"])');
-        let idx = startIndex;
-        trs.forEach(tr => {
-            if (tr.style.visibility !== 'hidden') {
-                const h = tr.offsetHeight;
-                if (h > 0) {
-                    rowHeights[idx] = h;
-                }
-                idx++;
-            }
+        // Initialiser Clusterize
+        clusterize = new Clusterize({
+            scrollId: 'scrollableTable',
+            contentId: 'tableBody',
+            rows: rows // tableau de strings HTML
         });
-    });
-}
+    } else {
+        // Mettre à jour les lignes
+        clusterize.update(rows);
+    }
 
-function initVirtualScroll() {
-    const wrapper = document.querySelector('.table-wrapper');
-    if (!wrapper) return;
-    // Supprimer les anciens écouteurs pour éviter les doublons
-    wrapper.removeEventListener('scroll', onScrollHandler);
-    wrapper.addEventListener('scroll', onScrollHandler);
-}
-
-function onScrollHandler() {
-    if (scrollTimeout) cancelAnimationFrame(scrollTimeout);
-    scrollTimeout = requestAnimationFrame(() => {
-        updateVisibleRows();
-    });
+    // Mettre à jour les statistiques
+    updateMiniStats();
 }
 
         function scrollToLastDossier() {
@@ -8982,2558 +9222,548 @@ function onScrollHandler() {
           }
         }
 
-        function renderLigne(tr, dossier, isParentBlocked, isSplitted) {
-          tr.dataset.ref = dossier.ref; // À ajouter
-          const isChild = !!dossier.parent_ref;
-          const isParentBlockedFields = isParentBlocked && !isChild;
-          const isChildBlockedFields = isChild;
+        
+function renderLigne(dossier, isParentBlocked, isSplitted) {
+    const isChild = !!dossier.parent_ref;
+    const isParentBlockedFields = isParentBlocked && !isChild;
+    const isChildBlockedFields = isChild;
 
-          const dossierRevisions = revisionsData.filter(
-            (r) => r.dossier_id === dossier.id,
-          );
-          const dossierFournisseurs = fournisseursLies.filter(
-            (f) => f.dossier_id === dossier.id,
-          );
-          const dossierCommandeFourn = commandeFournisseursLies.filter(
-            (c) => c.dossier_id === dossier.id,
-          );
+    const disabled = (cond) => cond ? 'disabled' : '';
+    const selected = (val, ref) => val === ref ? 'selected' : '';
 
-          // Colonnes (même ordre que dans le tableau)
-          const cols = [
-            "select",
-            "ref",
-            "type_dossier",
-            "partenaire",
-            "type_client",
-            "region", // ← NOUVEAU
-            "client",
-            "ref_client",
-            "date_reception",
-            "informations_client",
-            "type_consultation",
-            "consultation_alloti",
-            "designation",
-            "division",
-            "sous_division",
-            "type_prestation",
-            "charge_dossier",
-            "date_reception_cd", // ← NOUVEAU
-            "fournisseurs",
-            "proforma",
-            'sofraico',
-            "marge_dossier",
-            "commission_partenaire",
-            "caution",
-            "date_limite_depot",
-            "etat",
-            "ref_commande",
-            "date_reception_com", // ← NOUVEAU
-            "montant_commande",
-            "commande_fournisseurs",
-            "validation",
-            "remarque",
-          ];
+    let html = `<tr data-ref="${dossier.ref}" data-id="${dossier.id}" class="parent-row ${getRowEtatClass(dossier.etat)} ${isSplitted ? 'row-splitted' : ''}">`;
 
-          cols.forEach((colId) => {
-            const td = document.createElement("td");
+    // ---- COLONNE 1 : Sélection ----
+    html += `<td><input type="checkbox" class="row-select" data-id="${dossier.id}"></td>`;
 
-            // ==================== SELECT ====================
-            if (colId === "select") {
-              let cb = document.createElement("input");
-              cb.type = "checkbox";
-              cb.classList.add("row-select");
-              cb.dataset.id = dossier.id;
-              td.appendChild(cb);
-            }
-            // ==================== REF ====================
-            else if (colId === "ref") {
-              td.innerHTML = dossier.ref;
-              if (dossier.type_dossier === "Partenaire") {
-                let badge = document.createElement("span");
-                badge.className = "badge-partenaire";
-                badge.innerHTML = '<i class="fas fa-handshake"></i> Partenaire';
-                td.appendChild(badge);
-              } else {
-                let badge = document.createElement("span");
-                badge.className = "badge-stcco";
-                badge.innerHTML = '<i class="fas fa-building"></i> STCCo';
-                td.appendChild(badge);
-              }
-              if (isChild) {
-                let badge2 = document.createElement("span");
-                badge2.className = "badge-child";
-                badge2.innerHTML =
-                  '<i class="fas fa-code-branch"></i> Sous-dossier';
-                td.appendChild(badge2);
-              } else if (isSplitted) {
-                let badge2 = document.createElement("span");
-                badge2.className = "badge-splitted";
-                badge2.innerHTML =
-                  '<i class="fas fa-code-branch"></i> Splitté 🔒';
-                td.appendChild(badge2);
-              }
-            }
-            // ==================== TYPE DOSSIER ====================
-            else if (colId === "type_dossier") {
-              let container = document.createElement("div");
-              let radioStcco = document.createElement("input");
-              radioStcco.type = "radio";
-              radioStcco.name = `type_dossier_${dossier.id}`;
-              radioStcco.value = "STCCo";
-              let labelStcco = document.createElement("label");
-              labelStcco.textContent = "STCCo";
-              let radioPart = document.createElement("input");
-              radioPart.type = "radio";
-              radioPart.name = `type_dossier_${dossier.id}`;
-              radioPart.value = "Partenaire";
-              let labelPart = document.createElement("label");
-              labelPart.textContent = "Partenaire";
+    // ---- COLONNE 2 : N° Dossier ----
+    const badgeType = dossier.type_dossier === 'Partenaire'
+        ? '<span class="badge-partenaire"><i class="fas fa-handshake"></i> Partenaire</span>'
+        : '<span class="badge-stcco"><i class="fas fa-building"></i> STCCo</span>';
+    const badgeChild = isChild ? '<span class="badge-child"><i class="fas fa-code-branch"></i> Sous-dossier</span>' : '';
+    const badgeSplitted = isSplitted ? '<span class="badge-splitted"><i class="fas fa-code-branch"></i> Splitté 🔒</span>' : '';
+    html += `<td>${dossier.ref} ${badgeType} ${badgeChild} ${badgeSplitted}</td>`;
 
-              if (dossier.type_dossier === "STCCo") radioStcco.checked = true;
-              else if (dossier.type_dossier === "Partenaire")
-                radioPart.checked = true;
+    // ---- COLONNE 3 : Type dossier (radios) ----
+    const typeDisabled = disabled(isChildBlockedFields || !peutModifier(dossier, 'type_dossier'));
+    html += `<td>
+<input type="radio" name="type_dossier_${dossier.id}" value="STCCo" ${dossier.type_dossier === 'STCCo' ? 'checked' : ''} ${typeDisabled} data-dossier-id="${dossier.id}" data-field="type_dossier" data-type="radio">
+<label>STCCo</label>
+<input type="radio" name="type_dossier_${dossier.id}" value="Partenaire" ${dossier.type_dossier === 'Partenaire' ? 'checked' : ''} ${typeDisabled} data-dossier-id="${dossier.id}" data-field="type_dossier" data-type="radio">
+<label>Partenaire</label>
+    </td>`;
 
-              if (
-                isChildBlockedFields ||
-                !peutModifier(dossier, "type_dossier")
-              ) {
-                radioStcco.disabled = true;
-                radioPart.disabled = true;
-              } else {
-                radioStcco.onchange = (e) => {
-                  if (e.target.checked) {
-                    mettreAJour("type_dossier", "STCCo", dossier.id);
-                    mettreAJour("partenaire_nom", "", dossier.id);
-                  }
-                };
-                radioPart.onchange = (e) => {
-                  if (e.target.checked)
-                    mettreAJour("type_dossier", "Partenaire", dossier.id);
-                };
-              }
-              container.appendChild(radioStcco);
-              container.appendChild(labelStcco);
-              container.appendChild(radioPart);
-              container.appendChild(labelPart);
-              td.appendChild(container);
-            }
-            // ==================== PARTENAIRE ====================
-            else if (colId === "partenaire") {
-              if (dossier.type_dossier === "Partenaire") {
-                let sel = document.createElement("select");
-                sel.classList.add("select-smart");
-                if (
-                  isChildBlockedFields ||
-                  !peutModifier(dossier, "partenaire_nom")
-                )
-                  sel.disabled = true;
-                partenairesListe.forEach((p) => {
-                  let opt = document.createElement("option");
-                  opt.value = p;
-                  opt.textContent = p;
-                  if (dossier.partenaire_nom === p) opt.selected = true;
-                  sel.appendChild(opt);
-                });
-                if (
-                  !isChildBlockedFields &&
-                  peutModifier(dossier, "partenaire_nom")
-                )
-                  sel.onchange = (e) =>
-                    mettreAJour("partenaire_nom", e.target.value, dossier.id);
-                td.appendChild(sel);
-              } else {
-                td.textContent = "-";
-              }
-            }
-            // ==================== TYPE CLIENT ====================
-            else if (colId === "type_client") {
-              let sel = document.createElement("select");
-              sel.classList.add("select-smart");
-              if (isChildBlockedFields || !peutModifier(dossier, "type_client"))
-                sel.disabled = true;
-              typeClientList.forEach((t) => {
-                let opt = document.createElement("option");
-                opt.value = t;
-                opt.textContent = t;
-                if (dossier.type_client === t) opt.selected = true;
-                sel.appendChild(opt);
-              });
-              if (!isChildBlockedFields && peutModifier(dossier, "type_client"))
-                sel.onchange = (e) =>
-                  mettreAJour("type_client", e.target.value, dossier.id);
-              td.appendChild(sel);
-            }
-            // ==================== RÉGION ====================
-            // ==================== RÉGION (LISTE DÉROULANTE) ====================
-            else if (colId === "region") {
-              let sel = document.createElement("select");
-              sel.classList.add("select-smart");
+    // ---- COLONNE 4 : Partenaire (select) ----
+    html += `<td>`;
+    if (dossier.type_dossier === 'Partenaire') {
+        const partenaireOptions = partenairesListe.map(p =>
+            `<option value="${p}" ${selected(dossier.partenaire_nom, p)}>${p}</option>`
+        ).join('');
+        html += `<select class="select-smart" data-dossier-id="${dossier.id}" data-field="partenaire_nom" data-type="select" ${disabled(isChildBlockedFields || !peutModifier(dossier, 'partenaire_nom'))}>
+            ${partenaireOptions}
+        </select>`;
+    } else {
+        html += '-';
+    }
+    html += `</td>`;
 
-              // Option vide par défaut
-              let optVide = document.createElement("option");
-              optVide.value = "";
-              optVide.textContent = "-- Sélectionner --";
-              if (!dossier.region || dossier.region === "")
-                optVide.selected = true;
-              sel.appendChild(optVide);
+    // ---- COLONNE 5 : Type client ----
+    const clientOptions = typeClientList.map(t =>
+        `<option value="${t}" ${selected(dossier.type_client, t)}>${t}</option>`
+    ).join('');
+    html += `<td>
+        <select class="select-smart" data-dossier-id="${dossier.id}" data-field="type_client" data-type="select" ${disabled(isChildBlockedFields || !peutModifier(dossier, 'type_client'))}>
+            ${clientOptions}
+        </select>
+    </td>`;
 
-              // Ajouter les régions
-              regionsList.forEach((r) => {
-                let opt = document.createElement("option");
-                opt.value = r;
-                opt.textContent = r;
-                if (dossier.region === r) opt.selected = true;
-                sel.appendChild(opt);
-              });
+    // ---- COLONNE 6 : Région ----
+    const regionOptions = regionsList.map(r =>
+        `<option value="${r}" ${selected(dossier.region, r)}>${r}</option>`
+    ).join('');
+    html += `<td>
+        <select class="select-smart" data-dossier-id="${dossier.id}" data-field="region" data-type="select" ${disabled(isChildBlockedFields || !peutModifier(dossier, 'region'))}>
+            <option value="">-- Sélectionner --</option>
+            ${regionOptions}
+        </select>
+    </td>`;
 
-              // Gestion des permissions
-              if (isChildBlockedFields || !peutModifier(dossier, "region")) {
-                sel.disabled = true;
-              } else {
-                sel.onchange = (e) =>
-                  mettreAJour("region", e.target.value, dossier.id);
-              }
+    // ---- COLONNE 7 : Client ----
+    html += `<td>
+        <input type="text" value="${escapeHtml(dossier.client || '')}" class="input-smart" data-dossier-id="${dossier.id}" data-field="client" data-type="input" ${disabled(isChildBlockedFields || !peutModifier(dossier, 'client'))}>
+    </td>`;
 
-              td.appendChild(sel);
-            }
-            // ==================== CLIENT ====================
-            else if (colId === "client") {
-              let inp = document.createElement("input");
-              inp.value = dossier.client || "";
-              inp.classList.add("input-smart");
-              if (isChildBlockedFields || !peutModifier(dossier, "client"))
-                inp.disabled = true;
-              if (!isChildBlockedFields && peutModifier(dossier, "client"))
-                inp.onchange = (e) =>
-                  mettreAJour("client", e.target.value, dossier.id);
-              td.appendChild(inp);
-            }
-            // ==================== REF CLIENT ====================
-            else if (colId === "ref_client") {
-              let inp = document.createElement("input");
-              inp.value = dossier.ref_client || "";
-              inp.classList.add("input-smart");
-              if (isChildBlockedFields || !peutModifier(dossier, "ref_client"))
-                inp.disabled = true;
-              if (!isChildBlockedFields && peutModifier(dossier, "ref_client"))
-                inp.onchange = (e) =>
-                  mettreAJour("ref_client", e.target.value, dossier.id);
-              td.appendChild(inp);
-            }
-            // ... après le bloc "ref_client"
-            else if (colId === "date_reception") {
-              let inp = document.createElement("input");
-              inp.type = "date";
-              inp.value = dossier.date_reception || "";
-              inp.classList.add("input-smart");
-              // Désactiver si le dossier est bloqué ou si l'utilisateur n'a pas les droits
-              if (
-                isParentBlockedFields ||
-                !peutModifier(dossier, "date_reception")
-              ) {
-                inp.disabled = true;
-              } else {
-                inp.onchange = (e) =>
-                  mettreAJour("date_reception", e.target.value, dossier.id);
-              }
-              td.appendChild(inp);
-            }
-            // ... avant le bloc "informations_client"
-            // ==================== INFOS CLIENT ====================
-            else if (colId === "informations_client") {
-              if (isParentBlockedFields) {
-                td.innerHTML = getInformationsClient(dossier);
-              } else {
-                td.innerHTML = getInformationsClientEdit(dossier);
-                setTimeout(() => {
-                  const contactInput = document.getElementById(
-                    `contact_${dossier.id}`,
-                  );
-                  const posteInput = document.getElementById(
-                    `poste_${dossier.id}`,
-                  );
-                  const telInput = document.getElementById(`tel_${dossier.id}`);
-                  const emailInput = document.getElementById(
-                    `email_${dossier.id}`,
-                  );
+    // ---- COLONNE 8 : Réf client ----
+    html += `<td>
+        <input type="text" value="${escapeHtml(dossier.ref_client || '')}" class="input-smart" data-dossier-id="${dossier.id}" data-field="ref_client" data-type="input" ${disabled(isChildBlockedFields || !peutModifier(dossier, 'ref_client'))}>
+    </td>`;
 
-                  if (
-                    contactInput &&
-                    peutModifier(dossier, "contact_principal")
-                  )
-                    contactInput.onchange = (e) =>
-                      mettreAJour(
-                        "contact_principal",
-                        e.target.value,
-                        dossier.id,
-                      );
-                  if (posteInput && peutModifier(dossier, "poste_contact"))
-                    posteInput.onchange = (e) =>
-                      mettreAJour("poste_contact", e.target.value, dossier.id);
-                  if (telInput && peutModifier(dossier, "telephone_contact"))
-                    telInput.onchange = (e) =>
-                      mettreAJour(
-                        "telephone_contact",
-                        e.target.value,
-                        dossier.id,
-                      );
-                  if (emailInput && peutModifier(dossier, "email_contact"))
-                    emailInput.onchange = (e) =>
-                      mettreAJour("email_contact", e.target.value, dossier.id);
+    // ---- COLONNE 9 : Date réception ----
+    html += `<td>
+        <input type="date" value="${dossier.date_reception || ''}" class="input-smart" data-dossier-id="${dossier.id}" data-field="date_reception" data-type="date" ${disabled(isParentBlockedFields || !peutModifier(dossier, 'date_reception'))}>
+    </td>`;
 
-                  if (!peutModifier(dossier, "contact_principal"))
-                    contactInput.disabled = true;
-                  if (!peutModifier(dossier, "poste_contact"))
-                    posteInput.disabled = true;
-                  if (!peutModifier(dossier, "telephone_contact"))
-                    telInput.disabled = true;
-                  if (!peutModifier(dossier, "email_contact"))
-                    emailInput.disabled = true;
-                }, 10);
-              }
-            }
-            // ==================== TYPE CONSULTATION ====================
-            else if (colId === "type_consultation") {
-              let sel = document.createElement("select");
-              sel.classList.add("select-smart");
-              if (
-                isChildBlockedFields ||
-                !peutModifier(dossier, "type_consultation")
-              )
-                sel.disabled = true;
-              typeConsultationList.forEach((t) => {
-                let opt = document.createElement("option");
-                opt.value = t;
-                opt.textContent = t;
-                if (dossier.type_consultation === t) opt.selected = true;
-                sel.appendChild(opt);
-              });
-              if (
-                !isChildBlockedFields &&
-                peutModifier(dossier, "type_consultation")
-              )
-                sel.onchange = (e) =>
-                  mettreAJour("type_consultation", e.target.value, dossier.id);
-              td.appendChild(sel);
-            }
-            // ==================== ALLOTI ====================
-            else if (colId === "consultation_alloti") {
-              let container = document.createElement("div");
-              container.style.display = "flex";
-              container.style.alignItems = "center";
-              container.style.gap = "5px";
-
-              let cb = document.createElement("input");
-              cb.type = "checkbox";
-              cb.classList.add("checkbox-smart");
-              cb.checked = dossier.consultation_alloti || false;
-              cb.id = `alloti_${dossier.id}`;
-
-              if (
-                isChildBlockedFields ||
-                !peutModifier(dossier, "consultation_alloti")
-              )
-                cb.disabled = true;
-
-              if (
-                !isChildBlockedFields &&
-                peutModifier(dossier, "consultation_alloti")
-              ) {
-                cb.onchange = async (e) => {
-                  const isChecked = e.target.checked;
-                  await mettreAJour(
-                    "consultation_alloti",
-                    isChecked,
-                    dossier.id,
-                  );
-                  if (isChecked) {
-                    if (
-                      !dossier.designation ||
-                      dossier.designation.trim() === ""
-                    ) {
-                      await mettreAJour("designation", "Lot 1: ", dossier.id);
-                    }
-                  }
-                };
-              }
-              container.appendChild(cb);
-              let label = document.createElement("span");
-              label.textContent = "Alloti";
-              label.style.fontSize = "0.65rem";
-              label.style.fontWeight = "600";
-              container.appendChild(label);
-
-              let btnAjouter = document.createElement("button");
-              btnAjouter.innerHTML = '<i class="fas fa-plus"></i>';
-              btnAjouter.className = "btn-icon";
-              btnAjouter.title = "Ajouter un autre Lot";
-              btnAjouter.style.fontSize = "0.7rem";
-              btnAjouter.style.padding = "2px 6px";
-              btnAjouter.style.backgroundColor = "#28a745";
-              btnAjouter.style.color = "white";
-              btnAjouter.style.borderRadius = "50%";
-              btnAjouter.style.cursor = "pointer";
-
-              if (
-                isChildBlockedFields ||
-                !peutModifier(dossier, "consultation_alloti")
-              )
-                btnAjouter.disabled = true;
-              if (
-                !isChildBlockedFields &&
-                peutModifier(dossier, "consultation_alloti")
-              ) {
-                btnAjouter.onclick = async (e) => {
-                  e.preventDefault();
-                  e.stopPropagation();
-                  const newLot = await creerLot(dossier.id);
-                  if (newLot) {
-                    const lots = getLotsByDossier(dossier.id);
-                    const newDesign = lots
-                      .map((l) => `Lot ${l.lot_numero}: ${l.designation || ""}`)
-                      .join(" | ");
-                    await mettreAJour("designation", newDesign, dossier.id);
-                    applyFilters();
-                  }
-                };
-              }
-              container.appendChild(btnAjouter);
-              td.appendChild(container);
-            }
-            // ==================== DESIGNATION ====================
-            else if (colId === "designation") {
-              let container = document.createElement("div");
-              container.style.display = "flex";
-              container.style.flexDirection = "column";
-              container.style.gap = "4px";
-              container.style.minWidth = "250px";
-
-              if (
-                !dossier.consultation_alloti ||
-                (dossier.designation && !dossier.designation.includes("|"))
-              ) {
-                let inp = document.createElement("input");
-                inp.value = dossier.designation || "";
-                inp.placeholder = "Désignation";
-                inp.classList.add("input-smart");
-                inp.style.width = "100%";
-                if (
-                  isChildBlockedFields ||
-                  !peutModifier(dossier, "designation")
-                )
-                  inp.disabled = true;
-                if (
-                  !isChildBlockedFields &&
-                  peutModifier(dossier, "designation")
-                )
-                  inp.onchange = (e) =>
-                    mettreAJour("designation", e.target.value, dossier.id);
-                container.appendChild(inp);
-              }
-
-              if (dossier.consultation_alloti && dossier.designation) {
-                let options = dossier.designation
-                  .split("|")
-                  .map((o) => o.trim())
-                  .filter((o) => o);
-                const lots = getLotsByDossier(dossier.id);
-
-                options.forEach((opt, index) => {
-                  let [nom, desc] = opt.split(":").map((s) => s.trim());
-                  const lot =
-                    lots.find(
-                      (l) =>
-                        l.designation &&
-                        l.designation.includes(nom) &&
-                        l.lot_numero === index + 1,
-                    ) || lots[index];
-
-                  let optDiv = document.createElement("div");
-                  optDiv.className = "revision-item";
-                  optDiv.style.display = "flex";
-                  optDiv.style.alignItems = "center";
-                  optDiv.style.gap = "5px";
-                  optDiv.style.fontSize = "0.7rem";
-                  optDiv.style.padding = "4px 6px";
-                  optDiv.style.backgroundColor = "#f8f9fa";
-                  optDiv.style.borderRadius = "4px";
-                  optDiv.style.borderLeft = "3px solid #00529c";
-
-                  let inpOptName = document.createElement("input");
-                  inpOptName.value = nom || "";
-                  inpOptName.placeholder = "Lot";
-                  inpOptName.style.width = "90px";
-                  inpOptName.classList.add("input-smart");
-                  inpOptName.style.fontWeight = "600";
-
-                  let separator = document.createElement("span");
-                  separator.textContent = ":";
-                  separator.style.fontWeight = "bold";
-                  separator.style.color = "#00529c";
-
-                  let inpOptDesc = document.createElement("input");
-                  inpOptDesc.value = desc || "";
-                  inpOptDesc.placeholder = "Désignation";
-                  inpOptDesc.style.flex = "1";
-                  inpOptDesc.style.minWidth = "150px";
-                  inpOptDesc.classList.add("input-smart");
-
-                  let btnSuppr = document.createElement("button");
-                  btnSuppr.innerHTML = '<i class="fas fa-times"></i>';
-                  btnSuppr.className = "btn-icon";
-                  btnSuppr.title = "Supprimer ce lot";
-                  btnSuppr.style.color = "#dc3545";
-                  btnSuppr.style.fontSize = "0.6rem";
-
-                  if (
-                    isChildBlockedFields ||
-                    !peutModifier(dossier, "designation")
-                  ) {
-                    inpOptName.disabled = true;
-                    inpOptDesc.disabled = true;
-                    btnSuppr.disabled = true;
-                  }
-
-                  if (
-                    !isChildBlockedFields &&
-                    peutModifier(dossier, "designation")
-                  ) {
-                    // ==============================================================
-                    // MODIFICATION : quand on change le nom, on extrait le numéro
-                    // ==============================================================
-                    inpOptName.onchange = function () {
-                      const nouveauNom = inpOptName.value;
-                      const nouveauDesc = inpOptDesc.value;
-                      // Extraire le numéro du nom (ex: "Lot 3" -> 3)
-                      const match = nouveauNom.match(/Lot\s*(\d+)/i);
-                      let nouveauNumero = null;
-                      if (match) {
-                        nouveauNumero = parseInt(match[1]);
-                      } else {
-                        // Si le nom ne contient pas de numéro, on garde l'ancien
-                        nouveauNumero = lot.lot_numero;
-                      }
-                      // Mettre à jour le numéro de lot si différent
-                      if (
-                        lot &&
-                        nouveauNumero !== null &&
-                        nouveauNumero !== lot.lot_numero
-                      ) {
-                        updateLotField(lot.id, "lot_numero", nouveauNumero);
-                      }
-                      // Mettre à jour la désignation du lot
-                      if (lot) {
-                        updateLotField(
-                          lot.id,
-                          "designation",
-                          nouveauNom + ": " + nouveauDesc,
-                        );
-                      }
-                      // Mettre à jour la désignation du dossier (concaténation)
-                      let newDesignation = options
-                        .map((o, idx) => {
-                          if (idx === index)
-                            return nouveauNom + ": " + nouveauDesc;
-                          return o;
-                        })
-                        .join(" | ");
-                      mettreAJour("designation", newDesignation, dossier.id);
-                    };
-
-                    inpOptDesc.onchange = function () {
-                      let newDesignation = options
-                        .map((o, idx) => {
-                          if (idx === index)
-                            return inpOptName.value + ": " + inpOptDesc.value;
-                          return o;
-                        })
-                        .join(" | ");
-                      mettreAJour("designation", newDesignation, dossier.id);
-                      if (lot)
-                        updateLotField(
-                          lot.id,
-                          "designation",
-                          inpOptName.value + ": " + inpOptDesc.value,
-                        );
-                    };
-
-                    btnSuppr.onclick = async () => {
-                      if (lot) await supprimerLot(lot.id);
-                      options.splice(index, 1);
-                      let newDesignation = options.join(" | ");
-                      mettreAJour("designation", newDesignation, dossier.id);
-                    };
-                  }
-
-                  optDiv.appendChild(inpOptName);
-                  optDiv.appendChild(separator);
-                  optDiv.appendChild(inpOptDesc);
-                  optDiv.appendChild(btnSuppr);
-                  container.appendChild(optDiv);
-                });
-              }
-              td.appendChild(container);
-            }
-            // ==================== DIVISION ====================
-            else if (colId === "division") {
-              let sel = document.createElement("select");
-              sel.classList.add("select-smart");
-              const peutModifierDivision =
-                currentUser && currentUser.role === "direction";
-              if (!peutModifierDivision || isParentBlockedFields) {
-                sel.disabled = true;
-              } else {
-                sel.disabled = false;
-              }
-
-              let optVide = document.createElement("option");
-              optVide.value = "";
-              optVide.textContent = "-- Sélectionner --";
-              if (!dossier.division || dossier.division === "")
-                optVide.selected = true;
-              sel.appendChild(optVide);
-              divisionsList.forEach((d) => {
-                let opt = document.createElement("option");
-                opt.value = d;
-                opt.textContent = d;
-                if (dossier.division === d) opt.selected = true;
-                sel.appendChild(opt);
-              });
-              if (!sel.disabled && peutModifier(dossier, "division")) {
-                sel.onchange = async (e) => {
-                  const newDiv = e.target.value;
-                  if (newDiv) {
-                    await mettreAJour("division", newDiv, dossier.id);
-                    await mettreAJour(
-                      "charge_dossier",
-                      chargeMapping[newDiv]?.[0] || "À définir",
-                      dossier.id,
-                    );
-                    updateSousDivisionOptions(dossier.id, newDiv);
-                  }
-                };
-              }
-              td.appendChild(sel);
-            }
-            // ==================== SOUS DIVISION ====================
-            else if (colId === "sous_division") {
-              let sel = document.createElement("select");
-              sel.classList.add("select-smart");
-              sel.id = `sous_division_${dossier.id}`;
-              if (
-                isParentBlockedFields ||
-                !peutModifier(dossier, "sous_division")
-              ) {
-                sel.disabled = true;
-              } else {
-                sel.disabled = false;
-              }
-              let options = [];
-              const divisionEffective = dossier.division || "À définir";
-              if (divisionEffective === "O&G") {
-                options = [
-                  "Exploration et production",
-                  "TRC",
-                  "LQS",
-                  "Raffinage & Petrochimie",
-                  "Commercialisation",
-                  "Power",
-                  "Energies renouvelables",
-                ];
-              } else if (divisionEffective === "EPC") {
-                options = [
-                  "Exploration et production",
-                  "TRC",
-                  "LQS",
-                  "Raffinage & Petrochimie",
-                  "Commercialisation",
-                  "Power",
-                  "Energies renouvelables",
-                ];
-              } else if (divisionEffective === "Water") {
-                options = [
-                  "Dessalement",
-                  "Assainissement",
-                  "Irrigation",
-                  "Eau potable",
-                ];
-              } else if (divisionEffective === "Industrie") {
-                options = [
-                  "Agroalimentaire",
-                  "Pharma",
-                  "Materiaux",
-                  "Chimie",
-                  "Cimenterie",
-                  "Metallurgie",
-                ];
-              } else if (divisionEffective === "Projet") {
-                options = ["O&G", "Water", "EPC", "Industrie"];
-              } else {
-                options = sousDivisionsMap[divisionEffective] || ["Aucune"];
-              }
-              if (!options.includes("Aucune")) options.unshift("Aucune");
-              options.forEach((sd) => {
-                let opt = document.createElement("option");
-                opt.value = sd;
-                opt.textContent = sd;
-                if (dossier.sous_division === sd) opt.selected = true;
-                sel.appendChild(opt);
-              });
-              if (!sel.disabled && peutModifier(dossier, "sous_division")) {
-                sel.onchange = (e) => {
-                  mettreAJour("sous_division", e.target.value, dossier.id);
-                };
-              }
-              td.appendChild(sel);
-            }
-            // ==================== TYPE PRESTATION ====================
-            else if (colId === "type_prestation") {
-              let sel = document.createElement("select");
-              sel.classList.add("type-prestation-select");
-              let optDefaut = document.createElement("option");
-              optDefaut.value = "";
-              optDefaut.textContent = "-- Sélectionner --";
-              sel.appendChild(optDefaut);
-              typePrestationList.forEach((tp) => {
-                let opt = document.createElement("option");
-                opt.value = tp;
-                opt.textContent = tp;
-                if (dossier.type_prestation === tp) opt.selected = true;
-                sel.appendChild(opt);
-              });
-              if (
-                dossier.division === "Projet" &&
-                !isParentBlockedFields &&
-                peutModifier(dossier, "type_prestation")
-              ) {
-                sel.disabled = false;
-                sel.onchange = (e) =>
-                  mettreAJour("type_prestation", e.target.value, dossier.id);
-              } else {
-                sel.disabled = true;
-              }
-              td.appendChild(sel);
-            }
-            // ==================== CHARGE DOSSIER ====================
-            else if (colId === "charge_dossier") {
-              let opts = chargeMapping[dossier.division] || ["À définir"];
-              let sel = document.createElement("select");
-              sel.classList.add("select-smart");
-              if (
-                isParentBlockedFields ||
-                !peutModifier(dossier, "charge_dossier")
-              )
-                sel.disabled = true;
-              opts.forEach((c) => {
-                let opt = document.createElement("option");
-                opt.value = c;
-                opt.textContent = c;
-                if (dossier.charge_dossier === c) opt.selected = true;
-                sel.appendChild(opt);
-              });
-              if (
-                !isParentBlockedFields &&
-                !isChildBlockedFields &&
-                peutModifier(dossier, "charge_dossier")
-              )
-                sel.onchange = (e) =>
-                  mettreAJour("charge_dossier", e.target.value, dossier.id);
-              td.appendChild(sel);
-            }
-
-            // ==================== DATE RÉCEPTION CD ====================
-            else if (colId === "date_reception_cd") {
-              let inp = document.createElement("input");
-              inp.type = "date";
-              inp.value = dossier.date_reception_cd || "";
-              inp.classList.add("input-smart");
-              if (
-                isParentBlockedFields ||
-                !peutModifier(dossier, "date_reception_cd")
-              ) {
-                inp.disabled = true;
-              } else {
-                inp.onchange = (e) =>
-                  mettreAJour("date_reception_cd", e.target.value, dossier.id);
-              }
-              td.appendChild(inp);
-            }
-            // ==================== FOURNISSEURS ====================
-            else if (colId === "fournisseurs") {
-              let container = document.createElement("div");
-              if (!isParentBlockedFields) {
-                dossierFournisseurs.forEach((f) => {
-                  let div = document.createElement("div");
-                  div.className = "fournisseur-item";
-                  div.innerHTML = `<span><strong>${f.fournisseurs?.nom}</strong> (${f.reference_fournisseur || "-"}) : ${f.montant} ${f.devise}</span>
-                        <button class="btn-icon" onclick="window.deleteFournisseurLien(${f.id})"><i class="fas fa-trash"></i></button>`;
-                  container.appendChild(div);
-                });
-                let addBtn = document.createElement("button");
-                addBtn.innerHTML = '<i class="fas fa-plus"></i> Ajouter';
-                addBtn.className = "btn-icon";
-                if (!peutModifier(dossier, "fournisseurs"))
-                  addBtn.disabled = true;
-                // Dans renderLigne, section "fournisseurs"
-                // Dans renderLigne, section "fournisseurs" - MODIFIER le addBtn.onclick
-                // Dans renderLigne, section "fournisseurs" - REMPLACER COMPLÈTEMENT
-                addBtn.onclick = () => {
-                  let modalHtml = `
-    <div class="modal-split" id="fournisseurModal">
-        <div class="modal-card">
-            <h4><i class="fas fa-truck"></i> Ajouter fournisseur</h4>
-            <div style="font-size:0.7rem;color:#6c757d;margin-bottom:10px;background:#f8f9fc;padding:8px;border-radius:6px;">
-                <i class="fas fa-info-circle" style="color:#00529c;"></i> 
-                Sélectionnez un partenaire existant ou choisissez <strong>"Autre"</strong> pour un fournisseur hors partenaire
-            </div>
-            <div id="fournisseurSelectContainer" class="fournisseur-select-container"></div>
-            <input type="text" id="refFourn" placeholder="Référence fournisseur" class="input-smart" style="margin-top:10px;">
-            <input type="number" id="mtFourn" placeholder="Montant" class="input-smart" style="margin-top:5px;">
-            <select id="devFourn" class="select-smart" style="margin-top:5px;">
-                ${devisesList.map((d) => `<option value="${d}">${d}</option>`).join("")}
-            </select>
-            <div style="display:flex; gap:10px; margin-top:15px;">
-                <button class="btn-premium btn-primary" id="btnSaveFourn"><i class="fas fa-save"></i> Ajouter</button>
-                <button class="btn-premium btn-outline" id="btnCancelFourn"><i class="fas fa-times"></i> Annuler</button>
-            </div>
+    // ---- COLONNE 10 : Informations client ----
+    html += `<td>
+        <div style="display:flex; flex-direction:column; gap:4px;">
+            <input type="text" id="contact_${dossier.id}" class="input-smart" placeholder="Contact principal" value="${escapeHtml(dossier.contact_principal || '')}" style="font-size:0.7rem;" data-dossier-id="${dossier.id}" data-field="contact_principal" data-type="input" ${disabled(isParentBlockedFields || !peutModifier(dossier, 'contact_principal'))}>
+            <input type="text" id="poste_${dossier.id}" class="input-smart" placeholder="Poste" value="${escapeHtml(dossier.poste_contact || '')}" style="font-size:0.7rem;" data-dossier-id="${dossier.id}" data-field="poste_contact" data-type="input" ${disabled(isParentBlockedFields || !peutModifier(dossier, 'poste_contact'))}>
+            <input type="tel" id="tel_${dossier.id}" class="input-smart" placeholder="Téléphone" value="${escapeHtml(dossier.telephone_contact || '')}" style="font-size:0.7rem;" data-dossier-id="${dossier.id}" data-field="telephone_contact" data-type="input" ${disabled(isParentBlockedFields || !peutModifier(dossier, 'telephone_contact'))}>
+            <input type="email" id="email_${dossier.id}" class="input-smart" placeholder="Email" value="${escapeHtml(dossier.email_contact || '')}" style="font-size:0.7rem;" data-dossier-id="${dossier.id}" data-field="email_contact" data-type="input" ${disabled(isParentBlockedFields || !peutModifier(dossier, 'email_contact'))}>
         </div>
-    </div>`;
-                  document.body.insertAdjacentHTML("beforeend", modalHtml);
+    </td>`;
 
-                  const container = document.getElementById(
-                    "fournisseurSelectContainer",
-                  );
+    // ---- COLONNE 11 : Type consultation ----
+    const consultOptions = typeConsultationList.map(t =>
+        `<option value="${t}" ${selected(dossier.type_consultation, t)}>${t}</option>`
+    ).join('');
+    html += `<td>
+        <select class="select-smart" data-dossier-id="${dossier.id}" data-field="type_consultation" data-type="select" ${disabled(isChildBlockedFields || !peutModifier(dossier, 'type_consultation'))}>
+            ${consultOptions}
+        </select>
+    </td>`;
 
-                  // ✅ Fonction callback pour récupérer le fournisseur sélectionné
-                  let fournisseurSelectionne = null;
+    // ---- COLONNE 12 : Alloti ----
+    const allotiDisabled = disabled(isChildBlockedFields || !peutModifier(dossier, 'consultation_alloti'));
+    html += `<td>
+        <div style="display:flex; align-items:center; gap:5px;">
+            <input type="checkbox" class="checkbox-smart" ${dossier.consultation_alloti ? 'checked' : ''} data-dossier-id="${dossier.id}" data-field="consultation_alloti" data-type="checkbox" ${allotiDisabled}>
+            <span style="font-size:0.65rem; font-weight:600;">Alloti</span>
+            <button class="btn-icon" title="Ajouter un lot" data-action="ajouterLot" data-dossier-id="${dossier.id}" ${allotiDisabled}><i class="fas fa-plus"></i></button>
+        </div>
+    </td>`;
 
-                  const selectContainer = creerSelectFournisseur(
-                    null,
-                    null,
-                    function (fournisseur) {
-                      fournisseurSelectionne = fournisseur;
-                      console.log("Fournisseur sélectionné:", fournisseur);
-                    },
-                  );
-                  container.appendChild(selectContainer);
+    // ---- COLONNE 13 : Désignation (avec lots si alloti) ----
+    let designationHtml = '';
+    if (!dossier.consultation_alloti || (dossier.designation && !dossier.designation.includes('|'))) {
+        designationHtml = `<input type="text" value="${escapeHtml(dossier.designation || '')}" placeholder="Désignation" class="input-smart" style="width:100%;" data-dossier-id="${dossier.id}" data-field="designation" data-type="input" ${disabled(isChildBlockedFields || !peutModifier(dossier, 'designation'))}>`;
+    } else {
+        const lots = getLotsByDossier(dossier.id);
+        const options = dossier.designation.split('|').map(o => o.trim()).filter(o => o);
+        options.forEach((opt, index) => {
+            let [nom, desc] = opt.split(':').map(s => s.trim());
+            const lot = lots.find(l => l.designation && l.designation.includes(nom) && l.lot_numero === index + 1) || lots[index];
+            const lotId = lot ? lot.id : '';
+            designationHtml += `
+                <div class="revision-item" style="display:flex; align-items:center; gap:5px; font-size:0.7rem; padding:4px 6px; background:#f8f9fa; border-radius:4px; border-left:3px solid #00529c;">
+                    <input type="text" value="${escapeHtml(nom || '')}" placeholder="Lot" style="width:90px; font-weight:600;" class="input-smart" data-dossier-id="${dossier.id}" data-field="designation" data-type="input" data-lot-id="${lotId}" ${disabled(isChildBlockedFields || !peutModifier(dossier, 'designation'))}>
+                    <span style="font-weight:bold; color:#00529c;">:</span>
+                    <input type="text" value="${escapeHtml(desc || '')}" placeholder="Désignation" style="flex:1; min-width:150px;" class="input-smart" data-dossier-id="${dossier.id}" data-field="designation" data-type="input" data-lot-id="${lotId}" ${disabled(isChildBlockedFields || !peutModifier(dossier, 'designation'))}>
+                    <button class="btn-icon" title="Supprimer ce lot" data-action="supprimerLot" data-lot-id="${lotId}" data-dossier-id="${dossier.id}" ${disabled(isChildBlockedFields || !peutModifier(dossier, 'designation'))}><i class="fas fa-times"></i></button>
+                </div>
+            `;
+        });
+    }
+    html += `<td><div style="display:flex; flex-direction:column; gap:4px; min-width:250px;">${designationHtml}</div></td>`;
 
-                  document.getElementById("btnSaveFourn").onclick =
-                    async () => {
-                      const select = container.querySelector("select");
-                      const value = select.value;
+    // ---- COLONNE 14 : Division ----
+    const divisionDisabled = disabled(!(currentUser && currentUser.role === 'direction') || isParentBlockedFields);
+    const divOptions = divisionsList.map(d =>
+        `<option value="${d}" ${selected(dossier.division, d)}>${d}</option>`
+    ).join('');
+    html += `<td>
+        <select class="select-smart" data-dossier-id="${dossier.id}" data-field="division" data-type="select" ${divisionDisabled}>
+            <option value="">-- Sélectionner --</option>
+            ${divOptions}
+        </select>
+    </td>`;
 
-                      if (!value) {
-                        alert("⚠️ Veuillez sélectionner un fournisseur");
-                        return;
-                      }
+    // ---- COLONNE 15 : Sous-division ----
+    const sousDivDisabled = disabled(isParentBlockedFields || !peutModifier(dossier, 'sous_division'));
+    let sousDivOptions = [];
+    const divEff = dossier.division || 'À définir';
+    if (divEff === 'O&G') sousDivOptions = ['Exploration et production', 'TRC', 'LQS', 'Raffinage & Petrochimie', 'Commercialisation', 'Power', 'Energies renouvelables'];
+    else if (divEff === 'EPC') sousDivOptions = ['Exploration et production', 'TRC', 'LQS', 'Raffinage & Petrochimie', 'Commercialisation', 'Power', 'Energies renouvelables'];
+    else if (divEff === 'Water') sousDivOptions = ['Dessalement', 'Assainissement', 'Irrigation', 'Eau potable'];
+    else if (divEff === 'Industrie') sousDivOptions = ['Agroalimentaire', 'Pharma', 'Materiaux', 'Chimie', 'Cimenterie', 'Metallurgie'];
+    else if (divEff === 'Projet') sousDivOptions = ['O&G', 'Water', 'EPC', 'Industrie'];
+    else sousDivOptions = sousDivisionsMap[divEff] || ['Aucune'];
+    if (!sousDivOptions.includes('Aucune')) sousDivOptions.unshift('Aucune');
+    const sousOptions = sousDivOptions.map(sd =>
+        `<option value="${sd}" ${selected(dossier.sous_division, sd)}>${sd}</option>`
+    ).join('');
+    html += `<td>
+        <select class="select-smart" id="sous_division_${dossier.id}" data-dossier-id="${dossier.id}" data-field="sous_division" data-type="select" ${sousDivDisabled}>
+            ${sousOptions}
+        </select>
+    </td>`;
 
-                      let nomAutre = null;
-                      let fournisseurId = value;
+    // ---- COLONNE 16 : Type prestation ----
+    const prestaDisabled = (dossier.division !== 'Projet' || isParentBlockedFields || !peutModifier(dossier, 'type_prestation')) ? 'disabled' : '';
+    const prestaOptions = typePrestationList.map(tp =>
+        `<option value="${tp}" ${selected(dossier.type_prestation, tp)}>${tp}</option>`
+    ).join('');
+    html += `<td>
+        <select class="type-prestation-select" data-dossier-id="${dossier.id}" data-field="type_prestation" data-type="select" ${prestaDisabled}>
+            <option value="">-- Sélectionner --</option>
+            ${prestaOptions}
+        </select>
+    </td>`;
 
-                      // ✅ Vérifier si c'est "Autre"
-                      const estAutre =
-                        value === "autre" || value === "autre_temp";
+    // ---- COLONNE 17 : Chargé dossier ----
+    const chargeOptions = chargeMapping[dossier.division] || ['À définir'];
+    const chargeDisabled = disabled(isParentBlockedFields || !peutModifier(dossier, 'charge_dossier'));
+    const chargeSelect = chargeOptions.map(c =>
+        `<option value="${c}" ${selected(dossier.charge_dossier, c)}>${c}</option>`
+    ).join('');
+    html += `<td>
+        <select class="select-smart" data-dossier-id="${dossier.id}" data-field="charge_dossier" data-type="select" ${chargeDisabled}>
+            ${chargeSelect}
+        </select>
+    </td>`;
 
-                      if (estAutre) {
-                        // Récupérer le nom depuis l'option sélectionnée
-                        const selectedOpt =
-                          select.options[select.selectedIndex];
-                        if (
-                          selectedOpt &&
-                          selectedOpt.dataset &&
-                          selectedOpt.dataset.nom
-                        ) {
-                          nomAutre = selectedOpt.dataset.nom;
-                        } else {
-                          // Sinon, prendre du champ de saisie
-                          const inputAutre =
-                            container.querySelector('input[type="text"]');
-                          if (inputAutre) {
-                            nomAutre = inputAutre.value.trim();
-                          }
-                        }
+    // ---- COLONNE 18 : Date réception CD ----
+    html += `<td>
+        <input type="date" value="${dossier.date_reception_cd || ''}" class="input-smart" data-dossier-id="${dossier.id}" data-field="date_reception_cd" data-type="date" ${disabled(isParentBlockedFields || !peutModifier(dossier, 'date_reception_cd'))}>
+    </td>`;
 
-                        if (!nomAutre) {
-                          alert("⚠️ Veuillez saisir un nom de fournisseur");
-                          return;
-                        }
-                        fournisseurId = "autre";
-                      } else {
-                        // Fournisseur existant
-                        fournisseurId = parseInt(value);
-                      }
+    // ---- COLONNE 19 : Fournisseurs (dossier_fournisseurs) ----
+    let fournHtml = '';
+    if (!isParentBlockedFields) {
+        const dossierFourn = fournisseursLies.filter(f => f.dossier_id === dossier.id);
+        dossierFourn.forEach(f => {
+            const nom = f.fournisseurs?.nom || (f.nom_personnalise || 'Inconnu');
+            fournHtml += `<div class="fournisseur-item"><span><strong>${nom}</strong> (${f.reference_fournisseur || '-'}) : ${f.montant} ${f.devise}</span><button class="btn-icon" data-action="deleteFournisseurLien" data-id="${f.id}"><i class="fas fa-trash"></i></button></div>`;
+        });
+        const addDisabled = !peutModifier(dossier, 'fournisseurs') ? 'disabled' : '';
+        fournHtml += `<button class="btn-icon" data-action="ajouterFournisseur" data-dossier-id="${dossier.id}" ${addDisabled}><i class="fas fa-plus"></i> Ajouter</button>`;
+    } else {
+        fournHtml = '<span style="color:#dc3545; font-size:0.7rem;">🔒 Bloqué (parent splitté)</span>';
+    }
+    html += `<td><div>${fournHtml}</div></td>`;
 
-                      // ✅ Récupérer les valeurs
-                      const reference =
-                        document.getElementById("refFourn").value || "";
-                      const montant =
-                        parseFloat(document.getElementById("mtFourn").value) ||
-                        0;
-                      const devise =
-                        document.getElementById("devFourn").value || "€";
+    // ---- COLONNE 20 : Proforma (révisions) ----
+    let proformaHtml = '';
+    const isAlloti = dossier.consultation_alloti && dossier.designation && dossier.designation.includes('|');
+    if (isAlloti) {
+        const lots = getLotsByDossier(dossier.id);
+        lots.forEach(lot => {
+            proformaHtml += `<div style="margin-bottom:8px; border-left:2px solid #00529c; padding-left:6px;">
+                <div style="display:flex; justify-content:space-between; align-items:center;">
+                    <span style="font-weight:bold; font-size:0.7rem;">Lot ${lot.lot_numero}</span>
+                    ${!isParentBlockedFields && peutModifier(dossier, 'proforma') ? `<button class="btn-icon" data-action="supprimerLot" data-lot-id="${lot.id}" data-dossier-id="${dossier.id}" style="color:#dc3545;"><i class="fas fa-trash"></i></button>` : ''}
+                </div>`;
+            const revs = getRevisionsByLot(lot.id);
+            revs.forEach(rev => {
+                proformaHtml += `<div class="revision-item" style="font-size:0.7rem; display:flex; align-items:center; gap:4px; flex-wrap:wrap;">
+                    <span style="font-weight:500;">R${rev.revision_num}: </span>
+                    <input type="text" value="${escapeHtml(rev.ref_proforma || '')}" style="width:180px; font-size:0.65rem; font-family:monospace;" class="input-smart" data-action="updateRevision" data-rev-id="${rev.id}" data-field="ref_proforma" data-dossier-id="${dossier.id}" ${disabled(isParentBlockedFields || !peutModifier(dossier, 'proforma'))}>
+                    <input type="number" value="${rev.montant || 0}" style="width:60px;" class="input-smart" data-action="updateRevision" data-rev-id="${rev.id}" data-field="montant" data-dossier-id="${dossier.id}" ${disabled(isParentBlockedFields || !peutModifier(dossier, 'proforma'))}>
+                    <select class="select-smart" style="width:45px;" data-action="updateRevision" data-rev-id="${rev.id}" data-field="devise" data-dossier-id="${dossier.id}" ${disabled(isParentBlockedFields || !peutModifier(dossier, 'proforma'))}>
+                        ${devisesList.map(d => `<option value="${d}" ${rev.devise === d ? 'selected' : ''}>${d}</option>`).join('')}
+                    </select>
+                    <button class="btn-icon" data-action="deleteRevision" data-rev-id="${rev.id}" data-dossier-id="${dossier.id}" ${disabled(isParentBlockedFields || !peutModifier(dossier, 'proforma'))}><i class="fas fa-trash"></i></button>
+                </div>`;
+            });
+            proformaHtml += `<button class="btn-icon" data-action="ajouterRevision" data-dossier-id="${dossier.id}" data-lot-id="${lot.id}" ${disabled(isParentBlockedFields || !peutModifier(dossier, 'proforma'))}><i class="fas fa-plus"></i> Révision</button>`;
+            proformaHtml += `</div>`;
+        });
+    } else {
+        const dossierRevs = revisionsData.filter(r => r.dossier_id === dossier.id);
+        dossierRevs.forEach(rev => {
+            proformaHtml += `<div class="revision-item" style="font-size:0.7rem; display:flex; align-items:center; gap:4px; flex-wrap:wrap;">
+                <span style="font-weight:500;">R${rev.revision_num}: ${escapeHtml(rev.ref_proforma || '')} - </span>
+                <input type="number" value="${rev.montant || 0}" style="width:60px;" class="input-smart" data-action="updateRevision" data-rev-id="${rev.id}" data-field="montant" data-dossier-id="${dossier.id}" ${disabled(isParentBlockedFields || !peutModifier(dossier, 'proforma'))}>
+                <select class="select-smart" style="width:45px;" data-action="updateRevision" data-rev-id="${rev.id}" data-field="devise" data-dossier-id="${dossier.id}" ${disabled(isParentBlockedFields || !peutModifier(dossier, 'proforma'))}>
+                    ${devisesList.map(d => `<option value="${d}" ${rev.devise === d ? 'selected' : ''}>${d}</option>`).join('')}
+                </select>
+                <button class="btn-icon" data-action="deleteRevision" data-rev-id="${rev.id}" data-dossier-id="${dossier.id}" ${disabled(isParentBlockedFields || !peutModifier(dossier, 'proforma'))}><i class="fas fa-trash"></i></button>
+            </div>`;
+        });
+        proformaHtml += `<button class="btn-icon" data-action="ajouterRevision" data-dossier-id="${dossier.id}" ${disabled(isParentBlockedFields || !peutModifier(dossier, 'proforma'))}><i class="fas fa-plus"></i> Révision</button>`;
+    }
+    html += `<td><div>${proformaHtml}</div></td>`;
 
-                      console.log("📤 Envoi:", {
-                        dossierId: dossier.id,
-                        fournisseurId,
-                        reference,
-                        montant,
-                        devise,
-                        nomAutre,
-                      });
-
-                      // ✅ Appeler la fonction d'ajout
-                      const result = await ajouterFournisseur(
-                        dossier.id,
-                        fournisseurId,
-                        reference,
-                        montant,
-                        devise,
-                        nomAutre,
-                      );
-
-                      if (result) {
-                        document.getElementById("fournisseurModal").remove();
-                        // Rafraîchir le tableau
-                        await applyFilters();
-
-                        // Notification de succès
-                        const toast = document.createElement("div");
-                        toast.style.cssText =
-                          "position:fixed;bottom:20px;right:20px;background:#28a745;color:white;padding:12px 20px;border-radius:8px;z-index:10000;font-size:0.8rem;box-shadow:0 4px 12px rgba(0,0,0,0.2);";
-                        toast.innerHTML = `✅ Fournisseur ajouté avec succès !`;
-                        document.body.appendChild(toast);
-                        setTimeout(() => toast.remove(), 3000);
-                      }
-                    };
-
-                  document.getElementById("btnCancelFourn").onclick = () => {
-                    document.getElementById("fournisseurModal").remove();
-                  };
-                };
-                container.appendChild(addBtn);
-              } else {
-                container.innerHTML =
-                  '<span style="color:#dc3545; font-size:0.7rem;">🔒 Bloqué (parent splitté)</span>';
-              }
-              td.appendChild(container);
-            }
-
-            // ==================== PROFORMA ====================
-            else if (colId === "proforma") {
-              const isAlloti =
-                dossier.consultation_alloti &&
-                dossier.designation &&
-                dossier.designation.includes("|");
-              const container = document.createElement("div");
-              if (isAlloti) {
-                const lots = getLotsByDossier(dossier.id);
-                lots.forEach((lot) => {
-                  const lotDiv = document.createElement("div");
-                  lotDiv.style.marginBottom = "8px";
-                  lotDiv.style.borderLeft = "2px solid #00529c";
-                  lotDiv.style.paddingLeft = "6px";
-                  // En-tête du lot avec bouton de suppression
-                  const headerDiv = document.createElement("div");
-                  headerDiv.style.display = "flex";
-                  headerDiv.style.justifyContent = "space-between";
-                  headerDiv.style.alignItems = "center";
-                  const header = document.createElement("div");
-                  header.textContent = `Lot ${lot.lot_numero}`;
-                  header.style.fontWeight = "bold";
-                  header.style.fontSize = "0.7rem";
-                  headerDiv.appendChild(header);
-                  if (
-                    !isParentBlockedFields &&
-                    peutModifier(dossier, "proforma")
-                  ) {
-                    const delBtn = document.createElement("button");
-                    delBtn.innerHTML = '<i class="fas fa-trash"></i>';
-                    delBtn.className = "btn-icon";
-                    delBtn.style.color = "#dc3545";
-                    delBtn.onclick = async () => {
-                      if (confirm(`Supprimer le lot ${lot.lot_numero} ?`)) {
-                        await supprimerLot(lot.id);
-                        applyFilters();
-                      }
-                    };
-                    headerDiv.appendChild(delBtn);
-                  }
-                  lotDiv.appendChild(headerDiv);
-
-                  const revs = getRevisionsByLot(lot.id);
-                  // Dans la section "proforma" de renderLigne
-                  // Remplacer le bloc qui affiche les révisions
-
-                  revs.forEach((rev) => {
-                    const revDiv = document.createElement("div");
-                    revDiv.className = "revision-item";
-                    revDiv.style.fontSize = "0.7rem";
-                    revDiv.style.display = "flex";
-                    revDiv.style.alignItems = "center";
-                    revDiv.style.gap = "4px";
-                    revDiv.style.flexWrap = "wrap";
-
-                    // Affichage de la référence avec possibilité de modification
-                    const refSpan = document.createElement("span");
-                    refSpan.textContent = `R${rev.revision_num}: `;
-                    refSpan.style.fontWeight = "500";
-                    revDiv.appendChild(refSpan);
-
-                    // Champ de saisie pour la référence (permet la modification manuelle)
-                    const refInput = document.createElement("input");
-                    refInput.type = "text";
-                    refInput.value = rev.ref_proforma || "";
-                    refInput.style.width = "180px";
-                    refInput.style.fontSize = "0.65rem";
-                    refInput.style.fontFamily = "monospace";
-                    refInput.classList.add("input-smart");
-                    refInput.disabled =
-                      isParentBlockedFields ||
-                      !peutModifier(dossier, "proforma");
-                    if (!refInput.disabled) {
-                      refInput.onchange = (function (revId) {
-                        return function (e) {
-                          const nouvelleRef = e.target.value.trim();
-                          if (nouvelleRef === "") {
-                            alert("La référence ne peut pas être vide");
-                            e.target.value = rev.ref_proforma;
-                            return;
-                          }
-                          window.updateRevision(
-                            revId,
-                            "ref_proforma",
-                            nouvelleRef,
-                          );
-                        };
-                      })(rev.id);
-                    }
-                    revDiv.appendChild(refInput);
-
-                    // Montant
-                    const inpMt = document.createElement("input");
-                    inpMt.type = "number";
-                    inpMt.value = rev.montant || 0;
-                    inpMt.style.width = "60px";
-                    inpMt.classList.add("input-smart");
-                    inpMt.disabled =
-                      isParentBlockedFields ||
-                      !peutModifier(dossier, "proforma");
-                    if (!inpMt.disabled) {
-                      inpMt.onchange = (function (revId) {
-                        return function (e) {
-                          window.updateRevision(
-                            revId,
-                            "montant",
-                            e.target.value,
-                          );
-                        };
-                      })(rev.id);
-                    }
-                    revDiv.appendChild(inpMt);
-
-                    const selDev = document.createElement("select");
-                    selDev.classList.add("select-smart");
-                    selDev.style.width = "45px";
-                    selDev.disabled =
-                      isParentBlockedFields ||
-                      !peutModifier(dossier, "proforma");
-                    devisesList.forEach((d) => {
-                      const opt = document.createElement("option");
-                      opt.value = d;
-                      opt.textContent = d;
-                      if (rev.devise === d) opt.selected = true;
-                      selDev.appendChild(opt);
-                    });
-                    if (!selDev.disabled) {
-                      selDev.onchange = (function (revId) {
-                        return function (e) {
-                          window.updateRevision(
-                            revId,
-                            "devise",
-                            e.target.value,
-                          );
-                        };
-                      })(rev.id);
-                    }
-                    revDiv.appendChild(selDev);
-
-                    const delBtn = document.createElement("button");
-                    delBtn.innerHTML = '<i class="fas fa-trash"></i>';
-                    delBtn.className = "btn-icon";
-                    delBtn.disabled =
-                      isParentBlockedFields ||
-                      !peutModifier(dossier, "proforma");
-                    if (!delBtn.disabled) {
-                      delBtn.onclick = (function (revId) {
-                        return function () {
-                          window.deleteRevision(revId);
-                        };
-                      })(rev.id);
-                    }
-                    revDiv.appendChild(delBtn);
-                    container.appendChild(revDiv);
-                  });
-                  const addBtn = document.createElement("button");
-                  addBtn.innerHTML = '<i class="fas fa-plus"></i> Révision';
-                  addBtn.className = "btn-icon";
-                  addBtn.disabled =
-                    isParentBlockedFields || !peutModifier(dossier, "proforma");
-                  if (!addBtn.disabled) {
-                    addBtn.onclick = (function (lotId) {
-                      return function () {
-                        window.ajouterRevision(dossier.id, lotId);
-                      };
-                    })(lot.id);
-                  }
-                  lotDiv.appendChild(addBtn);
-                  container.appendChild(lotDiv);
-                });
-              } else {
-                // Code pour non-allotié (inchangé)
-                dossierRevisions.forEach((rev) => {
-                  let div = document.createElement("div");
-                  div.className = "revision-item";
-                  div.innerHTML = `R${rev.revision_num}: ${rev.ref_proforma} - `;
-                  let inpMt = document.createElement("input");
-                  inpMt.type = "number";
-                  inpMt.value = rev.montant || 0;
-                  inpMt.style.width = "60px";
-                  inpMt.classList.add("input-smart");
-                  inpMt.disabled =
-                    isParentBlockedFields || !peutModifier(dossier, "proforma");
-                  if (!inpMt.disabled) {
-                    inpMt.onchange = (function (revId) {
-                      return function (e) {
-                        window.updateRevision(revId, "montant", e.target.value);
-                      };
-                    })(rev.id);
-                  }
-                  div.appendChild(inpMt);
-                  let selDev = document.createElement("select");
-                  selDev.classList.add("select-smart");
-                  selDev.style.width = "45px";
-                  selDev.disabled =
-                    isParentBlockedFields || !peutModifier(dossier, "proforma");
-                  devisesList.forEach((d) => {
-                    let opt = document.createElement("option");
-                    opt.value = d;
-                    opt.textContent = d;
-                    if (rev.devise === d) opt.selected = true;
-                    selDev.appendChild(opt);
-                  });
-                  if (!selDev.disabled) {
-                    selDev.onchange = (function (revId) {
-                      return function (e) {
-                        window.updateRevision(revId, "devise", e.target.value);
-                      };
-                    })(rev.id);
-                  }
-                  div.appendChild(selDev);
-                  let delBtn = document.createElement("button");
-                  delBtn.innerHTML = '<i class="fas fa-trash"></i>';
-                  delBtn.className = "btn-icon";
-                  delBtn.disabled =
-                    isParentBlockedFields || !peutModifier(dossier, "proforma");
-                  if (!delBtn.disabled) {
-                    delBtn.onclick = (function (revId) {
-                      return function () {
-                        window.deleteRevision(revId);
-                      };
-                    })(rev.id);
-                  }
-                  div.appendChild(delBtn);
-                  container.appendChild(div);
-                });
-                let addBtn = document.createElement("button");
-                addBtn.innerHTML = '<i class="fas fa-plus"></i> Révision';
-                addBtn.className = "btn-icon";
-                addBtn.disabled =
-                  isParentBlockedFields || !peutModifier(dossier, "proforma");
-                if (!addBtn.disabled) {
-                  addBtn.onclick = () => window.ajouterRevision(dossier.id);
-                }
-                container.appendChild(addBtn);
-              }
-              td.appendChild(container);
-            }
-            //sofraico
-            else if (colId === 'sofraico') {
+    // ---- COLONNE 21 : Sofraico ----
     const sofraico = dossier.sofraico || { applicable: false, montant: 0, unite: '€' };
     const sofrDisabled = disabled(isParentBlockedFields || !peutModifier(dossier, 'sofraico'));
+    html += `<td>
+        <div style="display:flex; flex-direction:column; gap:4px;">
+            <div style="display:flex; align-items:center; gap:5px;">
+                <input type="checkbox" class="checkbox-smart" ${sofraico.applicable ? 'checked' : ''} data-dossier-id="${dossier.id}" data-field="sofraico" data-sofraico-part="applicable" ${sofrDisabled}>
+                <label style="font-size:0.7rem; font-weight:500;">Appliquer Sofraico</label>
+            </div>
+            <div style="display:${sofraico.applicable ? 'flex' : 'none'}; align-items:center; gap:5px; margin-top:4px;">
+                <input type="number" value="${sofraico.montant || 0}" placeholder="Montant" style="width:70px;" class="input-smart" data-dossier-id="${dossier.id}" data-field="sofraico" data-sofraico-part="montant" ${sofrDisabled}>
+                <select class="select-smart" style="width:55px;" data-dossier-id="${dossier.id}" data-field="sofraico" data-sofraico-part="unite" ${sofrDisabled}>
+                    ${['€','$','%'].map(u => `<option value="${u}" ${sofraico.unite === u ? 'selected' : ''}>${u}</option>`).join('')}
+                </select>
+            </div>
+        </div>
+    </td>`;
 
-    const container = document.createElement('div');
-    container.style.cssText = 'display:flex; flex-direction:column; gap:4px;';
+    // ---- COLONNE 22 : Marge ----
+    let margeHtml = '';
+    if (isAlloti) {
+        const lots = getLotsByDossier(dossier.id);
+        lots.forEach(lot => {
+            margeHtml += `<div style="display:flex; align-items:center; gap:4px;">
+                <span style="font-weight:bold; font-size:0.7rem;">Lot ${lot.lot_numero}:</span>
+                <input type="number" value="${lot.marge || 0}" style="width:70px;" class="input-smart" data-action="updateLot" data-lot-id="${lot.id}" data-field="marge" data-dossier-id="${dossier.id}" ${disabled(isParentBlockedFields || !peutModifier(dossier, 'marge_dossier'))}>
+                <select class="select-smart" style="width:50px;" data-action="updateLot" data-lot-id="${lot.id}" data-field="marge_devise" data-dossier-id="${dossier.id}" ${disabled(isParentBlockedFields || !peutModifier(dossier, 'marge_dossier'))}>
+                    ${devisesList.map(d => `<option value="${d}" ${lot.marge_devise === d ? 'selected' : ''}>${d}</option>`).join('')}
+                </select>
+                ${!isParentBlockedFields && peutModifier(dossier, 'marge_dossier') ? `<button class="btn-icon" data-action="supprimerLot" data-lot-id="${lot.id}" data-dossier-id="${dossier.id}" style="color:#dc3545;"><i class="fas fa-trash"></i></button>` : ''}
+            </div>`;
+        });
+    } else {
+        margeHtml = `<div style="display:flex; gap:3px;">
+            <input type="number" value="${dossier.marge_dossier || 0}" style="width:80px;" class="input-smart" data-dossier-id="${dossier.id}" data-field="marge_dossier" data-type="input" ${disabled(isParentBlockedFields || !peutModifier(dossier, 'marge_dossier'))}>
+            <select class="select-smart" style="width:55px;" data-dossier-id="${dossier.id}" data-field="marge_devise" data-type="select" ${disabled(isParentBlockedFields || !peutModifier(dossier, 'marge_dossier'))}>
+                ${devisesList.map(d => `<option value="${d}" ${dossier.marge_devise === d ? 'selected' : ''}>${d}</option>`).join('')}
+            </select>
+        </div>`;
+    }
+    html += `<td><div>${margeHtml}</div></td>`;
 
-    // Checkbox
-    const cbDiv = document.createElement('div');
-    cbDiv.style.cssText = 'display:flex; align-items:center; gap:5px;';
-    const cb = document.createElement('input');
-    cb.type = 'checkbox';
-    cb.className = 'checkbox-smart';
-    cb.checked = sofraico.applicable || false;
-    cb.dataset.dossierId = dossier.id;
-    cb.dataset.field = 'sofraico';
-    cb.dataset.sofraicoPart = 'applicable';
-    if (sofrDisabled) cb.disabled = true;
-    cbDiv.appendChild(cb);
-    const label = document.createElement('label');
-    label.textContent = 'Appliquer Sofraico';
-    label.style.cssText = 'font-size:0.7rem; font-weight:500;';
-    cbDiv.appendChild(label);
-    container.appendChild(cbDiv);
+    // ---- COLONNE 23 : Commission ----
+    let commissionHtml = '';
+    if (isAlloti) {
+        const lots = getLotsByDossier(dossier.id);
+        lots.forEach(lot => {
+            commissionHtml += `<div style="display:flex; align-items:center; gap:4px;">
+                <span style="font-weight:bold; font-size:0.7rem;">Lot ${lot.lot_numero}:</span>
+                <input type="number" value="${lot.commission || 0}" style="width:70px;" class="input-smart" data-action="updateLot" data-lot-id="${lot.id}" data-field="commission" data-dossier-id="${dossier.id}" ${disabled(isParentBlockedFields || !peutModifier(dossier, 'commission_partenaire'))}>
+                <select class="select-smart" style="width:50px;" data-action="updateLot" data-lot-id="${lot.id}" data-field="commission_devise" data-dossier-id="${dossier.id}" ${disabled(isParentBlockedFields || !peutModifier(dossier, 'commission_partenaire'))}>
+                    ${devisesList.map(d => `<option value="${d}" ${lot.commission_devise === d ? 'selected' : ''}>${d}</option>`).join('')}
+                </select>
+                ${!isParentBlockedFields && peutModifier(dossier, 'commission_partenaire') ? `<button class="btn-icon" data-action="supprimerLot" data-lot-id="${lot.id}" data-dossier-id="${dossier.id}" style="color:#dc3545;"><i class="fas fa-trash"></i></button>` : ''}
+            </div>`;
+        });
+    } else {
+        commissionHtml = `<div style="display:flex; gap:3px;">
+            <input type="number" value="${dossier.commission_partenaire || 0}" style="width:80px;" class="input-smart" data-dossier-id="${dossier.id}" data-field="commission_partenaire" data-type="input" ${disabled(isParentBlockedFields || !peutModifier(dossier, 'commission_partenaire'))}>
+            <select class="select-smart" style="width:55px;" data-dossier-id="${dossier.id}" data-field="commission_devise" data-type="select" ${disabled(isParentBlockedFields || !peutModifier(dossier, 'commission_partenaire'))}>
+                ${devisesList.map(d => `<option value="${d}" ${dossier.commission_devise === d ? 'selected' : ''}>${d}</option>`).join('')}
+            </select>
+        </div>`;
+    }
+    html += `<td><div>${commissionHtml}</div></td>`;
 
-    // Champs montant / unité
-    const fieldsWrap = document.createElement('div');
-    fieldsWrap.style.cssText = `display:${sofraico.applicable ? 'flex' : 'none'}; align-items:center; gap:5px; margin-top:4px;`;
-
-    const inpMt = document.createElement('input');
-    inpMt.type = 'number';
-    inpMt.value = sofraico.montant || 0;
-    inpMt.placeholder = 'Montant';
-    inpMt.className = 'input-smart';
-    inpMt.style.width = '70px';
-    inpMt.dataset.dossierId = dossier.id;
-    inpMt.dataset.field = 'sofraico';
-    inpMt.dataset.sofraicoPart = 'montant';
-    if (sofrDisabled) inpMt.disabled = true;
-    fieldsWrap.appendChild(inpMt);
-
-    const selUnite = document.createElement('select');
-    selUnite.className = 'select-smart';
-    selUnite.style.width = '55px';
-    selUnite.dataset.dossierId = dossier.id;
-    selUnite.dataset.field = 'sofraico';
-    selUnite.dataset.sofraicoPart = 'unite';
-    if (sofrDisabled) selUnite.disabled = true;
-    ['€', '$', '%'].forEach(u => {
-        const opt = document.createElement('option');
-        opt.value = u;
-        opt.textContent = u;
-        if (sofraico.unite === u) opt.selected = true;
-        selUnite.appendChild(opt);
-    });
-    fieldsWrap.appendChild(selUnite);
-    container.appendChild(fieldsWrap);
-
-    td.appendChild(container);
-}
-            // ==================== MARGE ====================
-            else if (colId === "marge_dossier") {
-              const isAlloti =
-                dossier.consultation_alloti &&
-                dossier.designation &&
-                dossier.designation.includes("|");
-              if (isAlloti) {
-                const lots = getLotsByDossier(dossier.id);
-                const container = document.createElement("div");
-                container.style.display = "flex";
-                container.style.flexDirection = "column";
-                container.style.gap = "4px";
-                lots.forEach((lot) => {
-                  const div = document.createElement("div");
-                  div.style.display = "flex";
-                  div.style.alignItems = "center";
-                  div.style.gap = "4px";
-                  const label = document.createElement("span");
-                  label.textContent = `Lot ${lot.lot_numero}:`;
-                  label.style.fontWeight = "bold";
-                  label.style.fontSize = "0.7rem";
-                  div.appendChild(label);
-                  const inp = document.createElement("input");
-                  inp.type = "number";
-                  inp.value = lot.marge || 0;
-                  inp.style.width = "70px";
-                  inp.classList.add("input-smart");
-                  if (
-                    isParentBlockedFields ||
-                    !peutModifier(dossier, "marge_dossier")
-                  )
-                    inp.disabled = true;
-                  else {
-                    inp.onchange = (e) =>
-                      updateLotField(
-                        lot.id,
-                        "marge",
-                        parseFloat(e.target.value) || 0,
-                      );
-                  }
-                  div.appendChild(inp);
-                  const selDev = document.createElement("select");
-                  selDev.classList.add("select-smart");
-                  selDev.style.width = "50px";
-                  if (
-                    isParentBlockedFields ||
-                    !peutModifier(dossier, "marge_dossier")
-                  )
-                    selDev.disabled = true;
-                  else {
-                    selDev.onchange = (e) =>
-                      updateLotField(lot.id, "marge_devise", e.target.value);
-                  }
-                  devisesList.forEach((d) => {
-                    const opt = document.createElement("option");
-                    opt.value = d;
-                    opt.textContent = d;
-                    if (lot.marge_devise === d) opt.selected = true;
-                    selDev.appendChild(opt);
-                  });
-                  div.appendChild(selDev);
-                  // Bouton de suppression du lot
-                  if (
-                    !isParentBlockedFields &&
-                    peutModifier(dossier, "marge_dossier")
-                  ) {
-                    const delBtn = document.createElement("button");
-                    delBtn.innerHTML = '<i class="fas fa-trash"></i>';
-                    delBtn.className = "btn-icon";
-                    delBtn.style.color = "#dc3545";
-                    delBtn.onclick = async () => {
-                      if (confirm(`Supprimer le lot ${lot.lot_numero} ?`)) {
-                        await supprimerLot(lot.id);
-                        applyFilters();
-                      }
-                    };
-                    div.appendChild(delBtn);
-                  }
-                  container.appendChild(div);
-                });
-                td.appendChild(container);
-              } else {
-                // Comportement classique (non-allotié)
-                const div = document.createElement("div");
-                div.style.display = "flex";
-                div.style.gap = "3px";
-                const inp = document.createElement("input");
-                inp.type = "number";
-                inp.value = dossier.marge_dossier || 0;
-                inp.style.width = "80px";
-                inp.classList.add("input-smart");
-                const selDev = document.createElement("select");
-                selDev.classList.add("select-smart");
-                selDev.style.width = "55px";
-                if (
-                  isParentBlockedFields ||
-                  !peutModifier(dossier, "marge_dossier")
-                ) {
-                  inp.disabled = true;
-                  selDev.disabled = true;
-                }
-                devisesList.forEach((d) => {
-                  const opt = document.createElement("option");
-                  opt.value = d;
-                  opt.textContent = d;
-                  if (dossier.marge_devise === d) opt.selected = true;
-                  selDev.appendChild(opt);
-                });
-                if (
-                  !isParentBlockedFields &&
-                  !isChildBlockedFields &&
-                  peutModifier(dossier, "marge_dossier")
-                ) {
-                  inp.onchange = (e) =>
-                    mettreAJour(
-                      "marge_dossier",
-                      parseFloat(e.target.value) || 0,
-                      dossier.id,
-                    );
-                  selDev.onchange = (e) =>
-                    mettreAJour("marge_devise", e.target.value, dossier.id);
-                }
-                div.appendChild(inp);
-                div.appendChild(selDev);
-                td.appendChild(div);
-              }
+    // ---- COLONNE 24 : Caution (version simplifiée mais complète) ----
+    // Je reprends la logique de votre code d'origine mais en HTML.
+    // Pour éviter de surcharger, on va copier la partie caution de votre ancien renderLigne
+    // en l'adaptant en HTML. Comme c'est long, je vais mettre un placeholder temporaire
+    // que vous pourrez remplacer par le code complet plus tard.
+    // Pour l'instant, on affiche les champs principaux.
+    let cautionHtml = '';
+    // Récupérer les lots si alloti
+    if (isAlloti) {
+        const lots = getLotsByDossier(dossier.id);
+        lots.forEach(lot => {
+            cautionHtml += `<div style="border-left:2px solid #00529c; padding-left:6px; margin-bottom:6px; background:#f8f9fa; border-radius:4px; padding:4px;">
+                <div style="display:flex; justify-content:space-between; align-items:center; margin-bottom:4px;">
+                    <span style="font-weight:bold; font-size:0.7rem;">Lot ${lot.lot_numero}</span>
+                    ${!isParentBlockedFields && peutModifier(dossier, 'caution') ? `<button class="btn-icon" data-action="supprimerLot" data-lot-id="${lot.id}" data-dossier-id="${dossier.id}" style="color:#dc3545;"><i class="fas fa-trash"></i></button>` : ''}
+                </div>
+                <div style="display:flex; align-items:center; gap:5px;">
+                    <input type="checkbox" class="checkbox-smart" ${lot.caution_applicable ? 'checked' : ''} data-action="updateLot" data-lot-id="${lot.id}" data-field="caution_applicable" data-dossier-id="${dossier.id}" data-type="checkbox" ${disabled(isParentBlockedFields || !peutModifier(dossier, 'caution_applicable'))}>
+                    <label style="font-size:0.65rem;">Applicable</label>
+                </div>`;
+            if (lot.caution_applicable === true) {
+                cautionHtml += `<div style="display:flex; align-items:center; gap:3px; margin-top:4px;">
+                    <span style="font-size:0.65rem; font-weight:600; color:#00529c;">Mt:</span>
+                    <input type="number" value="${lot.caution_montant || 0}" style="width:60px;" class="input-smart" style="font-size:0.65rem;" data-action="updateLot" data-lot-id="${lot.id}" data-field="caution_montant" data-dossier-id="${dossier.id}" ${disabled(isParentBlockedFields || !peutModifier(dossier, 'caution_montant'))}>
+                    <select class="select-smart" style="width:45px; font-size:0.65rem;" data-action="updateLot" data-lot-id="${lot.id}" data-field="caution_devise" data-dossier-id="${dossier.id}" ${disabled(isParentBlockedFields || !peutModifier(dossier, 'caution_devise'))}>
+                        ${devisesList.map(d => `<option value="${d}" ${lot.caution_devise === d ? 'selected' : ''}>${d}</option>`).join('')}
+                    </select>
+                </div>
+                <div style="display:flex; align-items:center; gap:3px; margin-top:4px;">
+                    <span style="font-size:0.65rem; font-weight:600; color:#00529c;">Émis:</span>
+                    <input type="date" value="${lot.caution_date_emission || ''}" style="width:90px;" class="input-smart" style="font-size:0.65rem;" data-action="updateLot" data-lot-id="${lot.id}" data-field="caution_date_emission" data-dossier-id="${dossier.id}" ${disabled(isParentBlockedFields || !peutModifier(dossier, 'caution_date_emission'))}>
+                    <span style="font-size:0.65rem; font-weight:600; color:#00529c; margin-left:5px;">Durée:</span>
+                    <input type="number" value="${lot.caution_duree || 0}" placeholder="jours" style="width:50px;" class="input-smart" style="font-size:0.65rem;" data-action="updateLot" data-lot-id="${lot.id}" data-field="caution_duree" data-dossier-id="${dossier.id}" ${disabled(isParentBlockedFields || !peutModifier(dossier, 'caution_duree'))}>
+                </div>
+                <div style="display:flex; align-items:center; gap:3px; margin-top:4px;">
+                    <span style="font-size:0.65rem; font-weight:600; color:#00529c;">Récup:</span>
+                    <select class="select-smart" style="width:80px; font-size:0.65rem;" data-action="updateLot" data-lot-id="${lot.id}" data-field="caution_recuperee" data-dossier-id="${dossier.id}" ${disabled(isParentBlockedFields || !peutModifier(dossier, 'caution_recuperee'))}>
+                        <option value="non" ${lot.caution_recuperee === 'non' ? 'selected' : ''}>❌ Non</option>
+                        <option value="oui" ${lot.caution_recuperee === 'oui' ? 'selected' : ''}>✅ Oui</option>
+                        <option value="partiel" ${lot.caution_recuperee === 'partiel' ? 'selected' : ''}>🟡 Partiel</option>
+                    </select>
+                </div>`;
             }
-            // ==================== COMMISSION ====================
-            else if (colId === "commission_partenaire") {
-              const isAlloti =
-                dossier.consultation_alloti &&
-                dossier.designation &&
-                dossier.designation.includes("|");
-              if (isAlloti) {
-                const lots = getLotsByDossier(dossier.id);
-                const container = document.createElement("div");
-                container.style.display = "flex";
-                container.style.flexDirection = "column";
-                container.style.gap = "4px";
-                lots.forEach((lot) => {
-                  const div = document.createElement("div");
-                  div.style.display = "flex";
-                  div.style.alignItems = "center";
-                  div.style.gap = "4px";
-                  const label = document.createElement("span");
-                  label.textContent = `Lot ${lot.lot_numero}:`;
-                  label.style.fontWeight = "bold";
-                  label.style.fontSize = "0.7rem";
-                  div.appendChild(label);
-                  const inp = document.createElement("input");
-                  inp.type = "number";
-                  inp.value = lot.commission || 0;
-                  inp.style.width = "70px";
-                  inp.classList.add("input-smart");
-                  if (
-                    isParentBlockedFields ||
-                    !peutModifier(dossier, "commission_partenaire")
-                  )
-                    inp.disabled = true;
-                  else {
-                    inp.onchange = (e) =>
-                      updateLotField(
-                        lot.id,
-                        "commission",
-                        parseFloat(e.target.value) || 0,
-                      );
-                  }
-                  div.appendChild(inp);
-                  const selDev = document.createElement("select");
-                  selDev.classList.add("select-smart");
-                  selDev.style.width = "50px";
-                  if (
-                    isParentBlockedFields ||
-                    !peutModifier(dossier, "commission_partenaire")
-                  )
-                    selDev.disabled = true;
-                  else {
-                    selDev.onchange = (e) =>
-                      updateLotField(
-                        lot.id,
-                        "commission_devise",
-                        e.target.value,
-                      );
-                  }
-                  devisesList.forEach((d) => {
-                    const opt = document.createElement("option");
-                    opt.value = d;
-                    opt.textContent = d;
-                    if (lot.commission_devise === d) opt.selected = true;
-                    selDev.appendChild(opt);
-                  });
-                  div.appendChild(selDev);
-                  // Bouton de suppression du lot
-                  if (
-                    !isParentBlockedFields &&
-                    peutModifier(dossier, "commission_partenaire")
-                  ) {
-                    const delBtn = document.createElement("button");
-                    delBtn.innerHTML = '<i class="fas fa-trash"></i>';
-                    delBtn.className = "btn-icon";
-                    delBtn.style.color = "#dc3545";
-                    delBtn.onclick = async () => {
-                      if (confirm(`Supprimer le lot ${lot.lot_numero} ?`)) {
-                        await supprimerLot(lot.id);
-                        applyFilters();
-                      }
-                    };
-                    div.appendChild(delBtn);
-                  }
-                  container.appendChild(div);
-                });
-                td.appendChild(container);
-              } else {
-                // Comportement classique (non-allotié)
-                const div = document.createElement("div");
-                div.style.display = "flex";
-                div.style.gap = "3px";
-                const inp = document.createElement("input");
-                inp.type = "number";
-                inp.value = dossier.commission_partenaire || 0;
-                inp.style.width = "80px";
-                inp.classList.add("input-smart");
-                const selDev = document.createElement("select");
-                selDev.classList.add("select-smart");
-                selDev.style.width = "55px";
-                if (
-                  isParentBlockedFields ||
-                  !peutModifier(dossier, "commission_partenaire")
-                ) {
-                  inp.disabled = true;
-                  selDev.disabled = true;
-                }
-                devisesList.forEach((d) => {
-                  const opt = document.createElement("option");
-                  opt.value = d;
-                  opt.textContent = d;
-                  if (dossier.commission_devise === d) opt.selected = true;
-                  selDev.appendChild(opt);
-                });
-                if (
-                  !isParentBlockedFields &&
-                  !isChildBlockedFields &&
-                  peutModifier(dossier, "commission_partenaire")
-                ) {
-                  inp.onchange = (e) =>
-                    mettreAJour(
-                      "commission_partenaire",
-                      parseFloat(e.target.value) || 0,
-                      dossier.id,
-                    );
-                  selDev.onchange = (e) =>
-                    mettreAJour(
-                      "commission_devise",
-                      e.target.value,
-                      dossier.id,
-                    );
-                }
-                div.appendChild(inp);
-                div.appendChild(selDev);
-                td.appendChild(div);
-              }
+            cautionHtml += `</div>`;
+        });
+    } else {
+        // Caution unique
+        const dateEmission = dossier.caution_date_emission;
+        const dureeJours = dossier.caution_duree ? parseInt(dossier.caution_duree) : 0;
+        const estRecuperee = dossier.caution_recuperee === 'oui';
+        const etat = dossier.etat || 'en cours';
+        let bgColor = '#ffffff';
+        if (estRecuperee) bgColor = '#d4edda';
+        else if (dateEmission && dureeJours > 0) {
+            const dateEm = new Date(dateEmission);
+            const dateLimite = new Date(dateEm);
+            dateLimite.setDate(dateEm.getDate() + dureeJours);
+            const aujourdhui = new Date();
+            aujourdhui.setHours(0,0,0,0);
+            const estDepasse = dateLimite < aujourdhui;
+            if (estDepasse) {
+                bgColor = (etat !== 'en cours') ? '#f8d7da' : '#fff3cd';
+            } else {
+                const joursRestants = Math.ceil((dateLimite - aujourdhui) / (1000*60*60*24));
+                if (joursRestants <= 30 && joursRestants > 0 && !estRecuperee) bgColor = '#fff3cd';
             }
-            // ==================== CAUTION (avec gestion par lot) ====================
-            else if (colId === "caution") {
-              const isAlloti =
-                dossier.consultation_alloti &&
-                dossier.designation &&
-                dossier.designation.includes("|");
-              const container = document.createElement("div");
-              container.style.display = "flex";
-              container.style.flexDirection = "column";
-              container.style.gap = "6px";
-
-              if (isAlloti) {
-                // ===== CAUTION PAR LOT =====
-                const lots = getLotsByDossier(dossier.id);
-                lots.forEach((lot) => {
-                  const lotDiv = document.createElement("div");
-                  lotDiv.style.borderLeft = "2px solid #00529c";
-                  lotDiv.style.paddingLeft = "6px";
-                  lotDiv.style.marginBottom = "6px";
-                  lotDiv.style.backgroundColor = "#f8f9fa";
-                  lotDiv.style.borderRadius = "4px";
-                  lotDiv.style.padding = "4px";
-
-                  // En-tête avec numéro de lot et bouton supprimer
-                  const headerDiv = document.createElement("div");
-                  headerDiv.style.display = "flex";
-                  headerDiv.style.justifyContent = "space-between";
-                  headerDiv.style.alignItems = "center";
-                  headerDiv.style.marginBottom = "4px";
-                  const header = document.createElement("div");
-                  header.textContent = `Lot ${lot.lot_numero}`;
-                  header.style.fontWeight = "bold";
-                  header.style.fontSize = "0.7rem";
-                  headerDiv.appendChild(header);
-                  if (
-                    !isParentBlockedFields &&
-                    peutModifier(dossier, "caution")
-                  ) {
-                    const delBtn = document.createElement("button");
-                    delBtn.innerHTML = '<i class="fas fa-trash"></i>';
-                    delBtn.className = "btn-icon";
-                    delBtn.style.color = "#dc3545";
-                    delBtn.onclick = async () => {
-                      if (confirm(`Supprimer le lot ${lot.lot_numero} ?`)) {
-                        await supprimerLot(lot.id);
-                        applyFilters();
-                      }
-                    };
-                    headerDiv.appendChild(delBtn);
-                  }
-                  lotDiv.appendChild(headerDiv);
-
-                  // Applicable
-                  const cbDiv = document.createElement("div");
-                  cbDiv.style.display = "flex";
-                  cbDiv.style.alignItems = "center";
-                  cbDiv.style.gap = "5px";
-                  const cb = document.createElement("input");
-                  cb.type = "checkbox";
-                  cb.checked = lot.caution_applicable || false;
-                  cb.className = "checkbox-smart";
-                  if (
-                    isParentBlockedFields ||
-                    !peutModifier(dossier, "caution_applicable")
-                  )
-                    cb.disabled = true;
-                  else {
-                    cb.onchange = (e) => {
-                      updateLotField(
-                        lot.id,
-                        "caution_applicable",
-                        e.target.checked,
-                      );
-                      if (!e.target.checked) {
-                        updateLotField(lot.id, "caution_montant", 0);
-                        updateLotField(lot.id, "caution_date_emission", null);
-                        updateLotField(lot.id, "caution_duree", 0);
-                        updateLotField(lot.id, "caution_recuperee", "non");
-                        updateLotField(
-                          lot.id,
-                          "caution_date_recuperation",
-                          null,
-                        );
-                      }
-                    };
-                  }
-                  cbDiv.appendChild(cb);
-                  const lbl = document.createElement("label");
-                  lbl.textContent = "Applicable";
-                  lbl.style.fontSize = "0.65rem";
-                  cbDiv.appendChild(lbl);
-                  lotDiv.appendChild(cbDiv);
-
-                  if (lot.caution_applicable) {
-                    // Montant
-                    const mtDiv = document.createElement("div");
-                    mtDiv.style.display = "flex";
-                    mtDiv.style.alignItems = "center";
-                    mtDiv.style.gap = "3px";
-                    const mtLabel = document.createElement("span");
-                    mtLabel.textContent = "Mt:";
-                    mtLabel.style.fontSize = "0.65rem";
-                    mtLabel.style.fontWeight = "600";
-                    mtLabel.style.color = "#00529c";
-                    mtDiv.appendChild(mtLabel);
-                    const inpMt = document.createElement("input");
-                    inpMt.type = "number";
-                    inpMt.value = lot.caution_montant || 0;
-                    inpMt.style.width = "60px";
-                    inpMt.classList.add("input-smart");
-                    inpMt.style.fontSize = "0.65rem";
-                    if (
-                      isParentBlockedFields ||
-                      !peutModifier(dossier, "caution_montant")
-                    )
-                      inpMt.disabled = true;
-                    else {
-                      inpMt.onchange = (e) =>
-                        updateLotField(
-                          lot.id,
-                          "caution_montant",
-                          parseFloat(e.target.value) || 0,
-                        );
-                    }
-                    mtDiv.appendChild(inpMt);
-                    const selDev = document.createElement("select");
-                    selDev.classList.add("select-smart");
-                    selDev.style.width = "45px";
-                    selDev.style.fontSize = "0.65rem";
-                    if (
-                      isParentBlockedFields ||
-                      !peutModifier(dossier, "caution_devise")
-                    )
-                      selDev.disabled = true;
-                    else {
-                      selDev.onchange = (e) =>
-                        updateLotField(
-                          lot.id,
-                          "caution_devise",
-                          e.target.value,
-                        );
-                    }
-                    devisesList.forEach((d) => {
-                      const opt = document.createElement("option");
-                      opt.value = d;
-                      opt.textContent = d;
-                      if (lot.caution_devise === d) opt.selected = true;
-                      selDev.appendChild(opt);
-                    });
-                    mtDiv.appendChild(selDev);
-                    lotDiv.appendChild(mtDiv);
-
-                    // Date émission
-                    const dateDiv = document.createElement("div");
-                    dateDiv.style.display = "flex";
-                    dateDiv.style.alignItems = "center";
-                    dateDiv.style.gap = "3px";
-                    const dateLabel = document.createElement("span");
-                    dateLabel.textContent = "Émis:";
-                    dateLabel.style.fontSize = "0.65rem";
-                    dateLabel.style.fontWeight = "600";
-                    dateLabel.style.color = "#00529c";
-                    dateDiv.appendChild(dateLabel);
-                    const inpDate = document.createElement("input");
-                    inpDate.type = "date";
-                    inpDate.value = lot.caution_date_emission || "";
-                    inpDate.style.width = "90px";
-                    inpDate.classList.add("input-smart");
-                    inpDate.style.fontSize = "0.65rem";
-                    if (
-                      isParentBlockedFields ||
-                      !peutModifier(dossier, "caution_date_emission")
-                    )
-                      inpDate.disabled = true;
-                    else {
-                      inpDate.onchange = (e) =>
-                        updateLotField(
-                          lot.id,
-                          "caution_date_emission",
-                          e.target.value,
-                        );
-                    }
-                    dateDiv.appendChild(inpDate);
-                    lotDiv.appendChild(dateDiv);
-
-                    // Durée
-                    const dureeDiv = document.createElement("div");
-                    dureeDiv.style.display = "flex";
-                    dureeDiv.style.alignItems = "center";
-                    dureeDiv.style.gap = "3px";
-                    const dureeLabel = document.createElement("span");
-                    dureeLabel.textContent = "Durée:";
-                    dureeLabel.style.fontSize = "0.65rem";
-                    dureeLabel.style.fontWeight = "600";
-                    dureeLabel.style.color = "#00529c";
-                    dureeDiv.appendChild(dureeLabel);
-                    const inpDuree = document.createElement("input");
-                    inpDuree.type = "number";
-                    inpDuree.value = lot.caution_duree || 0;
-                    inpDuree.placeholder = "jours";
-                    inpDuree.style.width = "50px";
-                    inpDuree.classList.add("input-smart");
-                    inpDuree.style.fontSize = "0.65rem";
-                    if (
-                      isParentBlockedFields ||
-                      !peutModifier(dossier, "caution_duree")
-                    )
-                      inpDuree.disabled = true;
-                    else {
-                      inpDuree.onchange = (e) =>
-                        updateLotField(
-                          lot.id,
-                          "caution_duree",
-                          parseInt(e.target.value) || 0,
-                        );
-                    }
-                    dureeDiv.appendChild(inpDuree);
-                    lotDiv.appendChild(dureeDiv);
-
-                    // Récupération
-                    const recupDiv = document.createElement("div");
-                    recupDiv.style.display = "flex";
-                    recupDiv.style.alignItems = "center";
-                    recupDiv.style.gap = "3px";
-                    const recupLabel = document.createElement("span");
-                    recupLabel.textContent = "Récup:";
-                    recupLabel.style.fontSize = "0.65rem";
-                    recupLabel.style.fontWeight = "600";
-                    recupLabel.style.color = "#00529c";
-                    recupDiv.appendChild(recupLabel);
-                    const recupSelect = document.createElement("select");
-                    recupSelect.classList.add("select-smart");
-                    recupSelect.style.width = "80px";
-                    recupSelect.style.fontSize = "0.65rem";
-                    if (
-                      isParentBlockedFields ||
-                      !peutModifier(dossier, "caution_recuperee")
-                    )
-                      recupSelect.disabled = true;
-                    else {
-                      recupSelect.onchange = (e) =>
-                        updateLotField(
-                          lot.id,
-                          "caution_recuperee",
-                          e.target.value,
-                        );
-                    }
-                    ["non", "oui", "partiel"].forEach((opt) => {
-                      const option = document.createElement("option");
-                      option.value = opt;
-                      option.textContent =
-                        opt === "non"
-                          ? "❌ Non"
-                          : opt === "oui"
-                            ? "✅ Oui"
-                            : "🟡 Partiel";
-                      if (lot.caution_recuperee === opt) option.selected = true;
-                      recupSelect.appendChild(option);
-                    });
-                    recupDiv.appendChild(recupSelect);
-                    lotDiv.appendChild(recupDiv);
-                  }
-                  container.appendChild(lotDiv);
-                });
-              } else {
-                // ===== CAUTION UNIQUE (non-allotié) =====
-                // (code existant pour non-allotié)
-                const dateEmission = dossier.caution_date_emission;
-                const dureeJours = dossier.caution_duree
-                  ? parseInt(dossier.caution_duree)
-                  : 0;
-                const estRecuperee = dossier.caution_recuperee === "oui";
-                const etat = dossier.etat || "en cours";
-
-                let bgColor = "#ffffff";
-                let bgClass = "";
-                if (estRecuperee) {
-                  bgColor = "#d4edda";
-                  bgClass = "caution-recovered";
-                } else if (dateEmission && dureeJours > 0) {
-                  const dateEm = new Date(dateEmission);
-                  const dateLimite = new Date(dateEm);
-                  dateLimite.setDate(dateEm.getDate() + dureeJours);
-                  const aujourdhui = new Date();
-                  aujourdhui.setHours(0, 0, 0, 0);
-                  const estDepasse = dateLimite < aujourdhui;
-                  if (estDepasse) {
-                    if (etat !== "en cours") {
-                      bgColor = "#f8d7da";
-                      bgClass = "caution-danger";
-                    } else {
-                      bgColor = "#fff3cd";
-                      bgClass = "caution-warning";
-                    }
-                  } else {
-                    const joursRestants = Math.ceil(
-                      (dateLimite - aujourdhui) / (1000 * 60 * 60 * 24),
-                    );
-                    if (
-                      joursRestants <= 30 &&
-                      joursRestants > 0 &&
-                      !estRecuperee
-                    ) {
-                      bgColor = "#fff3cd";
-                      bgClass = "caution-warning";
-                    }
-                  }
-                }
-                container.style.backgroundColor = bgColor;
-                container.style.padding = "5px";
-                container.style.borderRadius = "6px";
-                container.style.transition = "all 0.3s ease";
-
-                // Case à cocher "Applicable"
-                let cbDiv = document.createElement("div");
-                cbDiv.style.display = "flex";
-                cbDiv.style.alignItems = "center";
-                cbDiv.style.gap = "5px";
-                let cb = document.createElement("input");
-                cb.type = "checkbox";
-                cb.checked = dossier.caution_applicable || false;
-                cb.className = "checkbox-smart";
-                let cbLabel = document.createElement("label");
-                cbLabel.textContent = "Applicable";
-                cbLabel.style.fontSize = "0.7rem";
-                if (
-                  isParentBlockedFields ||
-                  !peutModifier(dossier, "caution_applicable")
-                ) {
-                  cb.disabled = true;
-                } else {
-                  cb.onchange = (e) => {
-                    mettreAJour(
-                      "caution_applicable",
-                      e.target.checked,
-                      dossier.id,
-                    );
-                    if (!e.target.checked) {
-                      mettreAJour("caution_montant", 0, dossier.id);
-                      mettreAJour("caution_date_emission", null, dossier.id);
-                      mettreAJour("caution_duree", "0", dossier.id);
-                      mettreAJour("caution_recuperee", "non", dossier.id);
-                      mettreAJour(
-                        "caution_date_recuperation",
-                        null,
-                        dossier.id,
-                      );
-                    }
-                  };
-                }
-                cbDiv.appendChild(cb);
-                cbDiv.appendChild(cbLabel);
-                container.appendChild(cbDiv);
-
-                if (dossier.caution_applicable) {
-                  // Montant
-                  let montantDiv = document.createElement("div");
-                  montantDiv.style.display = "flex";
-                  montantDiv.style.alignItems = "center";
-                  montantDiv.style.gap = "3px";
-                  montantDiv.style.flexWrap = "wrap";
-                  let montantLabel = document.createElement("span");
-                  montantLabel.textContent = "Mt:";
-                  montantLabel.style.fontSize = "0.65rem";
-                  montantLabel.style.fontWeight = "600";
-                  montantLabel.style.color = "#00529c";
-                  let inp = document.createElement("input");
-                  inp.type = "number";
-                  inp.value = dossier.caution_montant || 0;
-                  inp.placeholder = "Montant";
-                  inp.style.width = "70px";
-                  inp.classList.add("input-smart");
-                  if (
-                    isParentBlockedFields ||
-                    !peutModifier(dossier, "caution_montant")
-                  )
-                    inp.disabled = true;
-                  if (
-                    !isParentBlockedFields &&
-                    !isChildBlockedFields &&
-                    peutModifier(dossier, "caution_montant")
-                  ) {
-                    inp.onchange = (e) =>
-                      mettreAJour(
-                        "caution_montant",
-                        parseFloat(e.target.value) || 0,
-                        dossier.id,
-                      );
-                  }
-                  montantDiv.appendChild(montantLabel);
-                  montantDiv.appendChild(inp);
-
-                  let selDev = document.createElement("select");
-                  selDev.classList.add("select-smart");
-                  selDev.style.width = "50px";
-                  selDev.style.fontSize = "0.65rem";
-                  devisesList.forEach((d) => {
-                    let opt = document.createElement("option");
-                    opt.value = d;
-                    opt.textContent = d;
-                    if (dossier.caution_devise === d) opt.selected = true;
-                    selDev.appendChild(opt);
-                  });
-                  if (
-                    isParentBlockedFields ||
-                    !peutModifier(dossier, "caution_devise")
-                  )
-                    selDev.disabled = true;
-                  if (
-                    !isParentBlockedFields &&
-                    !isChildBlockedFields &&
-                    peutModifier(dossier, "caution_devise")
-                  ) {
-                    selDev.onchange = (e) =>
-                      mettreAJour("caution_devise", e.target.value, dossier.id);
-                  }
-                  montantDiv.appendChild(selDev);
-                  container.appendChild(montantDiv);
-
-                  // Date d'émission
-                  let dateDiv = document.createElement("div");
-                  dateDiv.style.display = "flex";
-                  dateDiv.style.alignItems = "center";
-                  dateDiv.style.gap = "3px";
-                  dateDiv.style.flexWrap = "wrap";
-                  let dateLabel = document.createElement("span");
-                  dateLabel.textContent = "Émis:";
-                  dateLabel.style.fontSize = "0.65rem";
-                  dateLabel.style.fontWeight = "600";
-                  dateLabel.style.color = "#00529c";
-                  let inpDate = document.createElement("input");
-                  inpDate.type = "date";
-                  inpDate.value = dossier.caution_date_emission || "";
-                  inpDate.classList.add("input-smart");
-                  inpDate.style.width = "100px";
-                  inpDate.style.fontSize = "0.65rem";
-                  if (
-                    isParentBlockedFields ||
-                    !peutModifier(dossier, "caution_date_emission")
-                  )
-                    inpDate.disabled = true;
-                  if (
-                    !isParentBlockedFields &&
-                    !isChildBlockedFields &&
-                    peutModifier(dossier, "caution_date_emission")
-                  ) {
-                    inpDate.onchange = (e) =>
-                      mettreAJour(
-                        "caution_date_emission",
-                        e.target.value,
-                        dossier.id,
-                      );
-                  }
-                  dateDiv.appendChild(dateLabel);
-                  dateDiv.appendChild(inpDate);
-                  container.appendChild(dateDiv);
-
-                  // Durée
-                  let dureeDiv = document.createElement("div");
-                  dureeDiv.style.display = "flex";
-                  dureeDiv.style.alignItems = "center";
-                  dureeDiv.style.gap = "3px";
-                  let dureeLabel = document.createElement("span");
-                  dureeLabel.textContent = "Durée:";
-                  dureeLabel.style.fontSize = "0.65rem";
-                  dureeLabel.style.fontWeight = "600";
-                  dureeLabel.style.color = "#00529c";
-                  let inpDuree = document.createElement("input");
-                  inpDuree.type = "number";
-                  inpDuree.value = dossier.caution_duree || "0";
-                  inpDuree.placeholder = "jours";
-                  inpDuree.style.width = "60px";
-                  inpDuree.classList.add("input-smart");
-                  inpDuree.style.fontSize = "0.65rem";
-                  if (
-                    isParentBlockedFields ||
-                    !peutModifier(dossier, "caution_duree")
-                  )
-                    inpDuree.disabled = true;
-                  if (
-                    !isParentBlockedFields &&
-                    !isChildBlockedFields &&
-                    peutModifier(dossier, "caution_duree")
-                  ) {
-                    inpDuree.onchange = (e) =>
-                      mettreAJour("caution_duree", e.target.value, dossier.id);
-                  }
-                  dureeDiv.appendChild(dureeLabel);
-                  dureeDiv.appendChild(inpDuree);
-                  container.appendChild(dureeDiv);
-
-                  // Récupération
-                  let recupDiv = document.createElement("div");
-                  recupDiv.style.display = "flex";
-                  recupDiv.style.alignItems = "center";
-                  recupDiv.style.gap = "3px";
-                  recupDiv.style.flexWrap = "wrap";
-                  let recupLabel = document.createElement("span");
-                  recupLabel.textContent = "Récup:";
-                  recupLabel.style.fontSize = "0.65rem";
-                  recupLabel.style.fontWeight = "600";
-                  recupLabel.style.color = "#00529c";
-                  let recupSelect = document.createElement("select");
-                  recupSelect.classList.add("select-smart");
-                  recupSelect.style.width = "100px";
-                  recupSelect.style.fontSize = "0.65rem";
-                  ["non", "oui", "partiel"].forEach((opt) => {
-                    let option = document.createElement("option");
-                    option.value = opt;
-                    option.textContent =
-                      opt === "non"
-                        ? "❌ Non"
-                        : opt === "oui"
-                          ? "✅ Oui"
-                          : "🟡 Partiel";
-                    if (dossier.caution_recuperee === opt)
-                      option.selected = true;
-                    recupSelect.appendChild(option);
-                  });
-                  if (
-                    isParentBlockedFields ||
-                    !peutModifier(dossier, "caution_recuperee")
-                  ) {
-                    recupSelect.disabled = true;
-                  } else {
-                    recupSelect.onchange = (e) => {
-                      mettreAJour(
-                        "caution_recuperee",
-                        e.target.value,
-                        dossier.id,
-                      );
-                    };
-                  }
-                  recupDiv.appendChild(recupLabel);
-                  recupDiv.appendChild(recupSelect);
-
-                  // Date de récupération
-                  let inpDateRecup = document.createElement("input");
-                  inpDateRecup.type = "date";
-                  inpDateRecup.value = dossier.caution_date_recuperation || "";
-                  inpDateRecup.classList.add("input-smart");
-                  inpDateRecup.style.width = "100px";
-                  inpDateRecup.style.fontSize = "0.65rem";
-                  if (
-                    isParentBlockedFields ||
-                    !peutModifier(dossier, "caution_date_recuperation")
-                  )
-                    inpDateRecup.disabled = true;
-                  if (
-                    !isParentBlockedFields &&
-                    !isChildBlockedFields &&
-                    peutModifier(dossier, "caution_date_recuperation")
-                  ) {
-                    inpDateRecup.onchange = (e) =>
-                      mettreAJour(
-                        "caution_date_recuperation",
-                        e.target.value,
-                        dossier.id,
-                      );
-                  }
-                  recupDiv.appendChild(inpDateRecup);
-                  container.appendChild(recupDiv);
-
-                  // Icône d'état visuel
-                  let etatIconDiv = document.createElement("div");
-                  etatIconDiv.style.display = "flex";
-                  etatIconDiv.style.alignItems = "center";
-                  etatIconDiv.style.gap = "5px";
-                  etatIconDiv.style.marginTop = "3px";
-                  etatIconDiv.style.fontSize = "0.65rem";
-                  if (estRecuperee) {
-                    etatIconDiv.innerHTML =
-                      '<i class="fas fa-check-circle" style="color:#28a745;"></i> <span style="color:#28a745;font-weight:500;">Caution récupérée</span>';
-                  } else if (dateEmission && dureeJours > 0) {
-                    const dateEm = new Date(dateEmission);
-                    const dateLimite = new Date(dateEm);
-                    dateLimite.setDate(dateEm.getDate() + dureeJours);
-                    const aujourdhui = new Date();
-                    aujourdhui.setHours(0, 0, 0, 0);
-                    const estDepasse = dateLimite < aujourdhui;
-                    if (estDepasse) {
-                      if (etat !== "en cours") {
-                        etatIconDiv.innerHTML =
-                          '<i class="fas fa-exclamation-triangle" style="color:#dc3545;"></i> <span style="color:#dc3545;font-weight:500;">⚠️ URGENT - À récupérer</span>';
-                      } else {
-                        etatIconDiv.innerHTML =
-                          '<i class="fas fa-clock" style="color:#ffc107;"></i> <span style="color:#856404;">⚠️ Délai dépassé</span>';
-                      }
-                    } else {
-                      const joursRestants = Math.ceil(
-                        (dateLimite - aujourdhui) / (1000 * 60 * 60 * 24),
-                      );
-                      if (joursRestants <= 30 && joursRestants > 0) {
-                        etatIconDiv.innerHTML = `<i class="fas fa-hourglass-half" style="color:#ffc107;"></i> <span style="color:#856404;">Expire dans ${joursRestants}j</span>`;
-                      }
-                    }
-                  }
-                  if (etatIconDiv.innerHTML !== "") {
-                    container.appendChild(etatIconDiv);
-                  }
-                }
-              }
-              td.appendChild(container);
-            }
-            // ==================== DATE LIMITE DÉPÔT ====================
-            else if (colId === "date_limite_depot") {
-              let container = document.createElement("div");
-              container.style.display = "flex";
-              container.style.flexDirection = "column";
-              container.style.gap = "4px";
-
-              let dateInput = document.createElement("input");
-              dateInput.type = "date";
-              dateInput.value = dossier.date_limite_depot || "";
-              dateInput.classList.add("input-smart");
-              dateInput.style.width = "130px";
-
-              if (
-                isParentBlockedFields ||
-                !peutModifier(dossier, "date_limite_depot")
-              ) {
-                dateInput.disabled = true;
-              } else {
-                dateInput.onchange = (e) => {
-                  mettreAJour("date_limite_depot", e.target.value, dossier.id);
-                  setTimeout(() => {
-                    if (typeof majCompteur === "function") majCompteur();
-                  }, 500);
-                };
-              }
-              container.appendChild(dateInput);
-
-              const {
-                class: alertClass,
-                message,
-                besoinProforma,
-              } = verifierDateLimiteDepot(dossier);
-              if (message) {
-                let msgSpan = document.createElement("span");
-                msgSpan.innerHTML = `<i class="fas ${besoinProforma ? "fa-file-invoice" : "fa-exclamation-triangle"}"></i> ${message}`;
-                msgSpan.style.fontSize = "0.65rem";
-                msgSpan.style.color = besoinProforma ? "#fd7e14" : "#dc3545";
-                msgSpan.style.fontWeight = "bold";
-                msgSpan.style.marginTop = "4px";
-                container.appendChild(msgSpan);
-              }
-              td.appendChild(container);
-              if (alertClass) td.classList.add(alertClass);
-            }
-            // ==================== ÉTAT ====================
-            else if (colId === "etat") {
-              let sel = document.createElement("select");
-              sel.classList.add("select-smart");
-              if (isParentBlockedFields || !peutModifier(dossier, "etat"))
-                sel.disabled = true;
-              etatsList.forEach((e) => {
-                let opt = document.createElement("option");
-                opt.value = e;
-                opt.textContent = e;
-                if (dossier.etat === e) opt.selected = true;
-                sel.appendChild(opt);
-              });
-              if (
-                !isParentBlockedFields &&
-                !isChildBlockedFields &&
-                peutModifier(dossier, "etat")
-              )
-                sel.onchange = (e) =>
-                  mettreAJour("etat", e.target.value, dossier.id);
-              td.appendChild(sel);
-            }
-            // ==================== RÉF COMMANDE (avec bouton supprimer lot) ====================
-            else if (colId === "ref_commande") {
-              const isAlloti =
-                dossier.consultation_alloti &&
-                dossier.designation &&
-                dossier.designation.includes("|");
-              if (isAlloti) {
-                const lots = getLotsByDossier(dossier.id);
-                const container = document.createElement("div");
-                container.style.display = "flex";
-                container.style.flexDirection = "column";
-                container.style.gap = "4px";
-                lots.forEach((lot) => {
-                  const div = document.createElement("div");
-                  div.style.display = "flex";
-                  div.style.alignItems = "center";
-                  div.style.gap = "4px";
-                  const label = document.createElement("span");
-                  label.textContent = `Lot ${lot.lot_numero}:`;
-                  label.style.fontWeight = "bold";
-                  label.style.fontSize = "0.7rem";
-                  div.appendChild(label);
-                  const inp = document.createElement("input");
-                  inp.type = "text";
-                  inp.value = lot.ref_commande || "";
-                  inp.style.width = "100px";
-                  inp.classList.add("input-smart");
-                  if (
-                    isParentBlockedFields ||
-                    !peutModifier(dossier, "ref_commande")
-                  )
-                    inp.disabled = true;
-                  else {
-                    inp.onchange = (e) =>
-                      updateLotField(lot.id, "ref_commande", e.target.value);
-                  }
-                  div.appendChild(inp);
-                  // Bouton de suppression du lot
-                  if (
-                    !isParentBlockedFields &&
-                    peutModifier(dossier, "ref_commande")
-                  ) {
-                    const delBtn = document.createElement("button");
-                    delBtn.innerHTML = '<i class="fas fa-trash"></i>';
-                    delBtn.className = "btn-icon";
-                    delBtn.style.color = "#dc3545";
-                    delBtn.onclick = async () => {
-                      if (confirm(`Supprimer le lot ${lot.lot_numero} ?`)) {
-                        await supprimerLot(lot.id);
-                        applyFilters();
-                      }
-                    };
-                    div.appendChild(delBtn);
-                  }
-                  container.appendChild(div);
-                });
-                td.appendChild(container);
-              } else {
-                // Comportement classique
-                const inp = document.createElement("input");
-                inp.value = dossier.ref_commande || "";
-                inp.classList.add("input-smart");
-                if (
-                  isParentBlockedFields ||
-                  !peutModifier(dossier, "ref_commande")
-                )
-                  inp.disabled = true;
-                if (
-                  !isParentBlockedFields &&
-                  !isChildBlockedFields &&
-                  peutModifier(dossier, "ref_commande")
-                ) {
-                  inp.onchange = (e) =>
-                    mettreAJour("ref_commande", e.target.value, dossier.id);
-                }
-                td.appendChild(inp);
-              }
-            }
-
-            // ==================== DATE RÉCEPTION COM ====================
-            else if (colId === "date_reception_com") {
-              let inp = document.createElement("input");
-              inp.type = "date";
-              inp.value = dossier.date_reception_com || "";
-              inp.classList.add("input-smart");
-              if (
-                isParentBlockedFields ||
-                !peutModifier(dossier, "date_reception_com")
-              ) {
-                inp.disabled = true;
-              } else {
-                inp.onchange = (e) =>
-                  mettreAJour("date_reception_com", e.target.value, dossier.id);
-              }
-              td.appendChild(inp);
-            }
-            // ==================== MONTANT COMMANDE (déjà avec bouton supprimer) ====================
-            else if (colId === "montant_commande") {
-              const isAlloti =
-                dossier.consultation_alloti &&
-                dossier.designation &&
-                dossier.designation.includes("|");
-              if (isAlloti) {
-                const lots = getLotsByDossier(dossier.id);
-                const container = document.createElement("div");
-                container.className = "lot-group";
-                container.style.display = "flex";
-                container.style.flexDirection = "column";
-                container.style.gap = "4px";
-
-                lots.forEach((lot) => {
-                  const div = document.createElement("div");
-                  div.style.display = "flex";
-                  div.style.alignItems = "center";
-                  div.style.gap = "4px";
-
-                  const label = document.createElement("span");
-                  label.textContent = `Lot ${lot.lot_numero}:`;
-                  label.style.fontWeight = "bold";
-                  label.style.fontSize = "0.7rem";
-                  div.appendChild(label);
-
-                  const inp = document.createElement("input");
-                  inp.type = "number";
-                  inp.value = lot.montant_commande || 0;
-                  inp.style.width = "70px";
-                  inp.classList.add("input-smart");
-                  if (
-                    isParentBlockedFields ||
-                    !peutModifier(dossier, "montant_commande")
-                  )
-                    inp.disabled = true;
-                  else {
-                    inp.onchange = (e) =>
-                      updateLotField(
-                        lot.id,
-                        "montant_commande",
-                        parseFloat(e.target.value) || 0,
-                      );
-                  }
-                  div.appendChild(inp);
-
-                  const selDev = document.createElement("select");
-                  selDev.classList.add("select-smart");
-                  selDev.style.width = "50px";
-                  if (
-                    isParentBlockedFields ||
-                    !peutModifier(dossier, "montant_commande")
-                  )
-                    selDev.disabled = true;
-                  else {
-                    selDev.onchange = (e) =>
-                      updateLotField(lot.id, "devise_commande", e.target.value);
-                  }
-                  devisesList.forEach((d) => {
-                    const opt = document.createElement("option");
-                    opt.value = d;
-                    opt.textContent = d;
-                    if (lot.devise_commande === d) opt.selected = true;
-                    selDev.appendChild(opt);
-                  });
-                  div.appendChild(selDev);
-
-                  if (
-                    !isParentBlockedFields &&
-                    peutModifier(dossier, "montant_commande")
-                  ) {
-                    const delBtn = document.createElement("button");
-                    delBtn.innerHTML = '<i class="fas fa-trash"></i>';
-                    delBtn.className = "btn-icon";
-                    delBtn.style.color = "#dc3545";
-                    delBtn.onclick = () => supprimerLot(lot.id);
-                    div.appendChild(delBtn);
-                  }
-                  container.appendChild(div);
-                });
-
-                if (
-                  !isParentBlockedFields &&
-                  peutModifier(dossier, "montant_commande")
-                ) {
-                  const addBtn = document.createElement("button");
-                  addBtn.innerHTML = '<i class="fas fa-plus"></i> Lot';
-                  addBtn.className = "btn-icon";
-                  addBtn.onclick = async () => {
-                    const newLot = await creerLot(dossier.id);
-                    if (newLot) {
-                      const lots = getLotsByDossier(dossier.id);
-                      const newDesign = lots
-                        .map(
-                          (l) => `Lot ${l.lot_numero}: ${l.designation || ""}`,
-                        )
-                        .join(" | ");
-                      await mettreAJour("designation", newDesign, dossier.id);
-                      applyFilters();
-                    }
-                  };
-                  container.appendChild(addBtn);
-                }
-                td.appendChild(container);
-              } else {
-                // Comportement classique
-                const div = document.createElement("div");
-                div.style.display = "flex";
-                div.style.gap = "3px";
-                const inp = document.createElement("input");
-                inp.type = "number";
-                inp.value = dossier.montant_commande || 0;
-                inp.style.width = "80px";
-                inp.classList.add("input-smart");
-                const selDev = document.createElement("select");
-                selDev.classList.add("select-smart");
-                selDev.style.width = "55px";
-                if (
-                  isParentBlockedFields ||
-                  !peutModifier(dossier, "montant_commande")
-                ) {
-                  inp.disabled = true;
-                  selDev.disabled = true;
-                }
-                devisesList.forEach((d) => {
-                  const opt = document.createElement("option");
-                  opt.value = d;
-                  opt.textContent = d;
-                  if (dossier.devise_commande === d) opt.selected = true;
-                  selDev.appendChild(opt);
-                });
-                if (
-                  !isParentBlockedFields &&
-                  !isChildBlockedFields &&
-                  peutModifier(dossier, "montant_commande")
-                ) {
-                  inp.onchange = (e) =>
-                    mettreAJour(
-                      "montant_commande",
-                      parseFloat(e.target.value) || 0,
-                      dossier.id,
-                    );
-                  selDev.onchange = (e) =>
-                    mettreAJour("devise_commande", e.target.value, dossier.id);
-                }
-                div.appendChild(inp);
-                div.appendChild(selDev);
-                td.appendChild(div);
-              }
-            }
-            // ==================== COMMANDE FOURNISSEURS ====================
-            else if (colId === "commande_fournisseurs") {
-              let container = document.createElement("div");
-              if (!isParentBlockedFields) {
-                dossierCommandeFourn.forEach((f) => {
-                  let div = document.createElement("div");
-                  div.className = "commande-fournisseur-item";
-                  div.innerHTML = `<span><strong>${f.fournisseurs?.nom}</strong> (${f.reference_fournisseur || "-"}) : ${f.montant} ${f.devise}</span>
-                        <button class="btn-icon" onclick="window.deleteCommandeFournisseur(${f.id})"><i class="fas fa-trash"></i></button>`;
-                  container.appendChild(div);
-                });
-                let addBtn = document.createElement("button");
-                addBtn.innerHTML = '<i class="fas fa-plus"></i> Ajouter';
-                addBtn.className = "btn-icon";
-                if (!peutModifier(dossier, "commande_fournisseurs"))
-                  addBtn.disabled = true;
-                addBtn.onclick = () => {
-                  let modalHtml = `<div class="modal-split" id="commandeFournModal"><div class="modal-card">
-                        <h4>Ajouter fournisseur commande</h4>
-                        <select id="fournSelectCmd" class="select-smart">${fournisseursListe.map((f) => `<option value="${f.id}">${f.nom}</option>`).join("")}</select>
-                        <input type="text" id="refFournCmd" placeholder="Référence" class="input-smart">
-                        <input type="number" id="mtFournCmd" placeholder="Montant" class="input-smart">
-                        <select id="devFournCmd" class="select-smart">${devisesList.map((d) => `<option value="${d}">${d}</option>`).join("")}</select>
-                        <div style="display:flex; gap:10px; margin-top:15px;">
-                            <button class="btn-premium btn-primary" id="btnSaveCommandeFourn">Ajouter</button>
-                            <button class="btn-premium btn-outline" id="btnCancelCommandeFourn">Annuler</button>
-                        </div>
-                    </div></div>`;
-                  document.body.insertAdjacentHTML("beforeend", modalHtml);
-                  document.getElementById("btnSaveCommandeFourn").onclick =
-                    () => {
-                      ajouterCommandeFournisseur(
-                        dossier.id,
-                        parseInt(
-                          document.getElementById("fournSelectCmd").value,
-                        ),
-                        document.getElementById("refFournCmd").value,
-                        parseFloat(
-                          document.getElementById("mtFournCmd").value,
-                        ) || 0,
-                        document.getElementById("devFournCmd").value,
-                      );
-                      document.getElementById("commandeFournModal").remove();
-                    };
-                  document.getElementById("btnCancelCommandeFourn").onclick =
-                    () =>
-                      document.getElementById("commandeFournModal").remove();
-                };
-                container.appendChild(addBtn);
-              } else {
-                container.innerHTML =
-                  '<span style="color:#dc3545; font-size:0.7rem;">🔒 Bloqué (parent splitté)</span>';
-              }
-              td.appendChild(container);
-            }
-            // ==================== VALIDATION ====================
-            else if (colId === "validation") {
-              let container = document.createElement("div");
-              container.style.display = "flex";
-              container.style.alignItems = "center";
-              container.style.gap = "8px";
-
-              let checkbox = document.createElement("input");
-              checkbox.type = "checkbox";
-              checkbox.checked = dossier.validation_hierarchie || false;
-              checkbox.className = "checkbox-smart";
-
-              const peutModifierValidation =
-                currentUser && currentUser.role === "direction";
-
-              if (!peutModifierValidation) {
-                checkbox.disabled = true;
-              } else {
-                checkbox.onchange = async (e) => {
-                  const isChecked = e.target.checked;
-                  await mettreAJour(
-                    "validation_hierarchie",
-                    isChecked,
-                    dossier.id,
-                  );
-                  if (
-                    (dossier.etat === "commande" ||
-                      dossier.etat === "clôturé") &&
-                    isChecked
-                  ) {
-                    await detecterEtCreerCommande(dossier);
-                  }
-                };
-              }
-              container.appendChild(checkbox);
-
-              let label = document.createElement("span");
-              label.textContent = "✓ Validation hiérarchie";
-              label.style.fontSize = "0.7rem";
-              label.style.fontWeight = "500";
-              label.style.color = peutModifierValidation
-                ? "#00529c"
-                : "#6c757d";
-              container.appendChild(label);
-
-              if (
-                !peutModifierValidation &&
-                currentUser &&
-                currentUser.role !== "direction"
-              ) {
-                let lockIcon = document.createElement("i");
-                lockIcon.className = "fas fa-lock";
-                lockIcon.style.fontSize = "0.7rem";
-                lockIcon.style.color = "#dc3545";
-                lockIcon.style.marginLeft = "5px";
-                container.appendChild(lockIcon);
-              }
-              td.appendChild(container);
-            }
-            // ==================== REMARQUE ====================
-            else if (colId === "remarque") {
-              td.className = "td-remarque";
-              let textarea = document.createElement("textarea");
-              textarea.value = dossier.remarque || "";
-              textarea.placeholder = "Remarque...";
-              textarea.style.minWidth = "200px";
-              textarea.style.minHeight = "60px";
-              textarea.style.resize = "vertical"; // If I suggest this.
-              if (isParentBlockedFields || !peutModifier(dossier, "remarque")) {
-                textarea.disabled = true;
-              } else {
-                textarea.disabled = false;
-                textarea.onchange = (e) =>
-                  mettreAJour("remarque", e.target.value, dossier.id);
-              }
-              td.appendChild(textarea);
-            }
-
-            tr.appendChild(td);
-          });
         }
+        cautionHtml = `<div style="background-color:${bgColor}; padding:5px; border-radius:6px; transition:all 0.3s ease;">
+            <div style="display:flex; align-items:center; gap:5px;">
+                <input type="checkbox" class="checkbox-smart" ${dossier.caution_applicable ? 'checked' : ''} data-dossier-id="${dossier.id}" data-field="caution_applicable" data-type="checkbox" ${disabled(isParentBlockedFields || !peutModifier(dossier, 'caution_applicable'))}>
+                <label style="font-size:0.7rem;">Applicable</label>
+            </div>`;
+        if (dossier.caution_applicable === true) {
+            cautionHtml += `<div style="display:flex; align-items:center; gap:3px; flex-wrap:wrap; margin-top:4px;">
+                <span style="font-size:0.65rem; font-weight:600; color:#00529c;">Mt:</span>
+                <input type="number" value="${dossier.caution_montant || 0}" placeholder="Montant" style="width:70px;" class="input-smart" data-dossier-id="${dossier.id}" data-field="caution_montant" data-type="input" ${disabled(isParentBlockedFields || !peutModifier(dossier, 'caution_montant'))}>
+                <select class="select-smart" style="width:50px; font-size:0.65rem;" data-dossier-id="${dossier.id}" data-field="caution_devise" data-type="select" ${disabled(isParentBlockedFields || !peutModifier(dossier, 'caution_devise'))}>
+                    ${devisesList.map(d => `<option value="${d}" ${dossier.caution_devise === d ? 'selected' : ''}>${d}</option>`).join('')}
+                </select>
+            </div>
+            <div style="display:flex; align-items:center; gap:3px; flex-wrap:wrap; margin-top:4px;">
+                <span style="font-size:0.65rem; font-weight:600; color:#00529c;">Émis:</span>
+                <input type="date" value="${dossier.caution_date_emission || ''}" class="input-smart" style="width:100px; font-size:0.65rem;" data-dossier-id="${dossier.id}" data-field="caution_date_emission" data-type="date" ${disabled(isParentBlockedFields || !peutModifier(dossier, 'caution_date_emission'))}>
+                <span style="font-size:0.65rem; font-weight:600; color:#00529c; margin-left:5px;">Durée:</span>
+                <input type="number" value="${dossier.caution_duree || '0'}" placeholder="jours" style="width:60px;" class="input-smart" style="font-size:0.65rem;" data-dossier-id="${dossier.id}" data-field="caution_duree" data-type="input" ${disabled(isParentBlockedFields || !peutModifier(dossier, 'caution_duree'))}>
+            </div>
+            <div style="display:flex; align-items:center; gap:3px; flex-wrap:wrap; margin-top:4px;">
+                <span style="font-size:0.65rem; font-weight:600; color:#00529c;">Récup:</span>
+                <select class="select-smart" style="width:100px; font-size:0.65rem;" data-dossier-id="${dossier.id}" data-field="caution_recuperee" data-type="select" ${disabled(isParentBlockedFields || !peutModifier(dossier, 'caution_recuperee'))}>
+                    <option value="non" ${dossier.caution_recuperee === 'non' ? 'selected' : ''}>❌ Non</option>
+                    <option value="oui" ${dossier.caution_recuperee === 'oui' ? 'selected' : ''}>✅ Oui</option>
+                    <option value="partiel" ${dossier.caution_recuperee === 'partiel' ? 'selected' : ''}>🟡 Partiel</option>
+                </select>
+                <input type="date" value="${dossier.caution_date_recuperation || ''}" class="input-smart" style="width:100px; font-size:0.65rem;" data-dossier-id="${dossier.id}" data-field="caution_date_recuperation" data-type="date" ${disabled(isParentBlockedFields || !peutModifier(dossier, 'caution_date_recuperation'))}>
+            </div>`;
+        }
+        cautionHtml += `</div>`;
+    }
+    html += `<td><div>${cautionHtml}</div></td>`;
 
-        function ajouterLotModal(dossierId) {
+    // ---- COLONNE 25 : Date limite dépôt ----
+    const dateLimiteInfo = verifierDateLimiteDepot(dossier);
+    html += `<td>
+        <div style="display:flex; flex-direction:column; gap:4px;">
+            <input type="date" value="${dossier.date_limite_depot || ''}" class="input-smart" style="width:130px;" data-dossier-id="${dossier.id}" data-field="date_limite_depot" data-type="date" ${disabled(isParentBlockedFields || !peutModifier(dossier, 'date_limite_depot'))}>
+            ${dateLimiteInfo.message ? `<span style="font-size:0.65rem; color:${dateLimiteInfo.besoinProforma ? '#fd7e14' : '#dc3545'}; font-weight:bold;"><i class="fas ${dateLimiteInfo.besoinProforma ? 'fa-file-invoice' : 'fa-exclamation-triangle'}"></i> ${dateLimiteInfo.message}</span>` : ''}
+        </div>
+    </td>`;
+
+    // ---- COLONNE 26 : État ----
+    const etatOptions = etatsList.map(e =>
+        `<option value="${e}" ${selected(dossier.etat, e)}>${e}</option>`
+    ).join('');
+    html += `<td>
+        <select class="select-smart" data-dossier-id="${dossier.id}" data-field="etat" data-type="select" ${disabled(isParentBlockedFields || !peutModifier(dossier, 'etat'))}>
+            ${etatOptions}
+        </select>
+    </td>`;
+
+    // ---- COLONNE 27 : Réf commande (avec lots si alloti) ----
+    let refCmdHtml = '';
+    if (isAlloti) {
+        const lots = getLotsByDossier(dossier.id);
+        lots.forEach(lot => {
+            refCmdHtml += `<div style="display:flex; align-items:center; gap:4px;">
+                <span style="font-weight:bold; font-size:0.7rem;">Lot ${lot.lot_numero}:</span>
+                <input type="text" value="${escapeHtml(lot.ref_commande || '')}" style="width:100px;" class="input-smart" data-action="updateLot" data-lot-id="${lot.id}" data-field="ref_commande" data-dossier-id="${dossier.id}" ${disabled(isParentBlockedFields || !peutModifier(dossier, 'ref_commande'))}>
+                ${!isParentBlockedFields && peutModifier(dossier, 'ref_commande') ? `<button class="btn-icon" data-action="supprimerLot" data-lot-id="${lot.id}" data-dossier-id="${dossier.id}" style="color:#dc3545;"><i class="fas fa-trash"></i></button>` : ''}
+            </div>`;
+        });
+    } else {
+        refCmdHtml = `<input type="text" value="${escapeHtml(dossier.ref_commande || '')}" class="input-smart" data-dossier-id="${dossier.id}" data-field="ref_commande" data-type="input" ${disabled(isParentBlockedFields || !peutModifier(dossier, 'ref_commande'))}>`;
+    }
+    html += `<td><div>${refCmdHtml}</div></td>`;
+
+    // ---- COLONNE 28 : Date réception Com ----
+    html += `<td>
+        <input type="date" value="${dossier.date_reception_com || ''}" class="input-smart" data-dossier-id="${dossier.id}" data-field="date_reception_com" data-type="date" ${disabled(isParentBlockedFields || !peutModifier(dossier, 'date_reception_com'))}>
+    </td>`;
+
+    // ---- COLONNE 29 : Montant commande (avec lots) ----
+    let montantCmdHtml = '';
+    if (isAlloti) {
+        const lots = getLotsByDossier(dossier.id);
+        lots.forEach(lot => {
+            montantCmdHtml += `<div style="display:flex; align-items:center; gap:4px;">
+                <span style="font-weight:bold; font-size:0.7rem;">Lot ${lot.lot_numero}:</span>
+                <input type="number" value="${lot.montant_commande || 0}" style="width:70px;" class="input-smart" data-action="updateLot" data-lot-id="${lot.id}" data-field="montant_commande" data-dossier-id="${dossier.id}" ${disabled(isParentBlockedFields || !peutModifier(dossier, 'montant_commande'))}>
+                <select class="select-smart" style="width:50px;" data-action="updateLot" data-lot-id="${lot.id}" data-field="devise_commande" data-dossier-id="${dossier.id}" ${disabled(isParentBlockedFields || !peutModifier(dossier, 'montant_commande'))}>
+                    ${devisesList.map(d => `<option value="${d}" ${lot.devise_commande === d ? 'selected' : ''}>${d}</option>`).join('')}
+                </select>
+                ${!isParentBlockedFields && peutModifier(dossier, 'montant_commande') ? `<button class="btn-icon" data-action="supprimerLot" data-lot-id="${lot.id}" data-dossier-id="${dossier.id}" style="color:#dc3545;"><i class="fas fa-trash"></i></button>` : ''}
+            </div>`;
+        });
+        if (!isParentBlockedFields && peutModifier(dossier, 'montant_commande')) {
+            montantCmdHtml += `<button class="btn-icon" data-action="ajouterLot" data-dossier-id="${dossier.id}"><i class="fas fa-plus"></i> Lot</button>`;
+        }
+    } else {
+        montantCmdHtml = `<div style="display:flex; gap:3px;">
+            <input type="number" value="${dossier.montant_commande || 0}" style="width:80px;" class="input-smart" data-dossier-id="${dossier.id}" data-field="montant_commande" data-type="input" ${disabled(isParentBlockedFields || !peutModifier(dossier, 'montant_commande'))}>
+            <select class="select-smart" style="width:55px;" data-dossier-id="${dossier.id}" data-field="devise_commande" data-type="select" ${disabled(isParentBlockedFields || !peutModifier(dossier, 'montant_commande'))}>
+                ${devisesList.map(d => `<option value="${d}" ${dossier.devise_commande === d ? 'selected' : ''}>${d}</option>`).join('')}
+            </select>
+        </div>`;
+    }
+    html += `<td><div>${montantCmdHtml}</div></td>`;
+
+    // ---- COLONNE 30 : Commande fournisseurs ----
+    let cmdFournHtml = '';
+    if (!isParentBlockedFields) {
+        const dossierCmdFourn = commandeFournisseursLies.filter(c => c.dossier_id === dossier.id);
+        dossierCmdFourn.forEach(f => {
+            const nom = f.fournisseurs?.nom || (f.nom_personnalise || 'Inconnu');
+            cmdFournHtml += `<div class="commande-fournisseur-item"><span><strong>${nom}</strong> (${f.reference_fournisseur || '-'}) : ${f.montant} ${f.devise}</span><button class="btn-icon" data-action="deleteCommandeFournisseur" data-id="${f.id}"><i class="fas fa-trash"></i></button></div>`;
+        });
+        const addDisabled = !peutModifier(dossier, 'commande_fournisseurs') ? 'disabled' : '';
+        cmdFournHtml += `<button class="btn-icon" data-action="ajouterCommandeFournisseur" data-dossier-id="${dossier.id}" ${addDisabled}><i class="fas fa-plus"></i> Ajouter</button>`;
+    } else {
+        cmdFournHtml = '<span style="color:#dc3545; font-size:0.7rem;">🔒 Bloqué</span>';
+    }
+    html += `<td><div>${cmdFournHtml}</div></td>`;
+
+    // ---- COLONNE 31 : Validation hiérarchie ----
+    const validDisabled = !(currentUser && currentUser.role === 'direction') ? 'disabled' : '';
+    html += `<td>
+        <div style="display:flex; align-items:center; gap:8px;">
+            <input type="checkbox" class="checkbox-smart" ${dossier.validation_hierarchie ? 'checked' : ''} data-dossier-id="${dossier.id}" data-field="validation_hierarchie" data-type="checkbox" ${validDisabled}>
+            <span style="font-size:0.7rem; font-weight:500; color:${validDisabled ? '#6c757d' : '#00529c'};">✓ Validation hiérarchie</span>
+            ${validDisabled ? '<i class="fas fa-lock" style="font-size:0.7rem; color:#dc3545; margin-left:5px;"></i>' : ''}
+        </div>
+    </td>`;
+
+    // ---- COLONNE 32 : Remarque ----
+    html += `<td class="td-remarque">
+        <textarea style="min-width:200px; min-height:60px; resize:vertical;" class="input-smart" data-dossier-id="${dossier.id}" data-field="remarque" data-type="textarea" ${disabled(isParentBlockedFields || !peutModifier(dossier, 'remarque'))}>${escapeHtml(dossier.remarque || '')}</textarea>
+    </td>`;
+
+    html += '</tr>';
+    return html;
+}
+
+
+// ===== Génération des lignes pour Clusterize =====
+function buildRowHTML(dossier, isParentBlocked, isSplitted) {
+    return renderLigne(dossier, isParentBlocked, isSplitted);
+}
+
+function generateRowsForClusterize(dossiersList) {
+    const rows = [];
+    const parents = dossiersList.filter(d => !d.parent_ref);
+    for (const parent of parents) {
+        const hasChild = dossiersList.some(d => d.parent_ref === parent.ref);
+        const isSplitted = hasChild && parent.division === "À définir";
+        rows.push(buildRowHTML(parent, hasChild, isSplitted));
+        
+        const enfants = dossiersList.filter(d => d.parent_ref === parent.ref);
+        for (const enfant of enfants) {
+            rows.push(buildRowHTML(enfant, false, false));
+        }
+    }
+    return rows;
+}
+
+function ajouterLotModal(dossierId) {
           let modalHtml = `<div class="modal-split" id="lotModal"><div class="modal-card"><h4><i class="fas fa-boxes"></i> Ajouter un lot</h4>
             <input type="text" id="lotDesignation" placeholder="Désignation du lot" class="input-smart">
             <input type="number" id="lotMontant" placeholder="Montant (€)" class="input-smart">

@@ -2317,13 +2317,17 @@ function disabled(condition) {
           return Math.ceil(diffTime / (1000 * 60 * 60 * 24));
         }
 
-        function calculerDatePVRD(datePVRP, garantieMois) {
-          if (!datePVRP || !garantieMois || garantieMois <= 0) return null;
-          const date = new Date(datePVRP);
-          date.setMonth(date.getMonth() + garantieMois);
-          return date.toISOString().split("T")[0];
-        }
+function calculerDatePVRD(datePVRP, garantieMois) {
+    if (!datePVRP || !garantieMois || garantieMois <= 0) return null;
 
+    const date = parseDateLocal(datePVRP);
+
+    if (!date) return null;
+
+    date.setMonth(date.getMonth() + garantieMois);
+
+    return formatDateISO(date);
+}
         function calculerPenalite(montant, pctParSemaine, retardJours) {
           if (!montant || !pctParSemaine || !retardJours || retardJours <= 0)
             return 0;
@@ -2487,6 +2491,58 @@ function disabled(condition) {
             return;
           }
 
+          // ======================================================
+// GESTION DATE STABLE - FORMAT INTERNE YYYY-MM-DD
+// ======================================================
+
+function parseDateLocal(dateStr) {
+    if (!dateStr) return null;
+
+    // Déjà au bon format : YYYY-MM-DD
+    if (/^\d{4}-\d{2}-\d{2}$/.test(dateStr)) {
+        const [year, month, day] = dateStr.split("-").map(Number);
+        return new Date(year, month - 1, day);
+    }
+
+    // Format ISO avec heure : 2026-04-03T...
+    if (/^\d{4}-\d{2}-\d{2}T/.test(dateStr)) {
+        const [year, month, day] = dateStr.substring(0, 10)
+            .split("-")
+            .map(Number);
+
+        return new Date(year, month - 1, day);
+    }
+
+    // Format français DD/MM/YYYY
+    if (/^\d{2}\/\d{2}\/\d{4}$/.test(dateStr)) {
+        const [day, month, year] = dateStr.split("/").map(Number);
+
+        return new Date(year, month - 1, day);
+    }
+
+    return null;
+}
+
+
+// Retourne TOUJOURS YYYY-MM-DD
+function formatDateISO(date) {
+    if (!(date instanceof Date) || isNaN(date)) return "";
+
+    const year = date.getFullYear();
+    const month = String(date.getMonth() + 1).padStart(2, "0");
+    const day = String(date.getDate()).padStart(2, "0");
+
+    return `${year}-${month}-${day}`;
+}
+function formatDateFR(dateStr) {
+    const date = parseDateLocal(dateStr);
+
+    if (!date) return "";
+
+    return String(date.getDate()).padStart(2, "0") + "/" +
+           String(date.getMonth() + 1).padStart(2, "0") + "/" +
+           date.getFullYear();
+}
           // ===== GESTION DES DOSSIERS ALLOTIÉS =====
           let refCommande = dossier.ref_commande;
           let montantCommande = dossier.montant_commande;
@@ -3265,6 +3321,20 @@ function disabled(condition) {
             // delai_fournisseur_propose, date_reception_previsionnelle,
             // date_reception_sofraico, date_reception_stcco,
             // reglement_fournisseur, reglement_sofraico
+        // ⬇️⬇️⬇️ NOUVEAU CODE AJOUTÉ ICI ⬇️⬇️⬇️
+        const dateFieldsCmd = [
+            'date_livraison_client', 'delai_client_reel',
+            'date_envoi_commande', 'date_reception_accuse',
+            'date_reception_previsionnelle', 'date_reception_sofraico',
+            'date_reception_stcco', 'date_signature_pvrp', 'date_signature_pvrd',
+            'date_recuperation_retenue1', 'date_recuperation_retenue2'
+        ];
+        for (let key of dateFieldsCmd) {
+            if (dataToSave.hasOwnProperty(key) && dataToSave[key] === '') {
+                dataToSave[key] = null;
+            }
+        }
+        // ⬆️⬆️⬆️ FIN DU NOUVEAU CODE ⬆️⬆️⬆️
 
             const { error } = await supabase
               .from("commandes")
@@ -3544,9 +3614,13 @@ function disabled(condition) {
         // Calculer date prévisionnelle = dateAccuse + delaiJours
         function calculerDatePrevisionnelle(dateAccuse, delaiJours) {
           if (!dateAccuse || !delaiJours || delaiJours <= 0) return null;
-          const date = new Date(dateAccuse);
-          date.setDate(date.getDate() + parseInt(delaiJours));
-          return date.toISOString().split("T")[0];
+const date = parseDateLocal(dateAccuse);
+
+if (!date) return null;
+
+date.setDate(date.getDate() + parseInt(delaiJours));
+
+return formatDateISO(date);
         }
 
         // Calculer délai réel = dateReception - dateAccuse (en jours)
@@ -4127,11 +4201,15 @@ function disabled(condition) {
                 const bg = i % 2 === 0 ? "#f8f9fa" : "#ffffff";
                 let datePrevis = "";
                 if (d.date_reception_accuse && d.delai_fournisseur_propose) {
-                  const date = new Date(d.date_reception_accuse);
-                  date.setDate(
-                    date.getDate() + parseInt(d.delai_fournisseur_propose),
-                  );
-                  datePrevis = date.toISOString().split("T")[0];
+const date = parseDateLocal(d.date_reception_accuse);
+
+if (date) {
+    date.setDate(
+        date.getDate() + parseInt(d.delai_fournisseur_propose)
+    );
+
+    datePrevis = formatDateISO(date);
+}
                 }
                 html += `
                 <div style="padding:2px 4px; background:${bg}; border-radius:3px; font-size:0.65rem;">
@@ -4597,9 +4675,13 @@ function disabled(condition) {
         // Fonction pour calculer la date prévisionnelle
         function calculerDatePrevisionnelle(dateAccuse, delaiJours) {
           if (!dateAccuse || !delaiJours || delaiJours <= 0) return null;
-          const date = new Date(dateAccuse);
-          date.setDate(date.getDate() + parseInt(delaiJours));
-          return date.toISOString().split("T")[0];
+const date = parseDateLocal(dateAccuse);
+
+if (!date) return null;
+
+date.setDate(date.getDate() + parseInt(delaiJours));
+
+return formatDateISO(date);
         }
 
         // Fonction pour calculer le retard fournisseur
@@ -6168,8 +6250,15 @@ function disabled(condition) {
             document.getElementById("filterTypePrestation")?.value || "";
 
           dossiersFiltres = dossiers.filter((d) => {
-            if (filterRef && !d.ref.toLowerCase().includes(filterRef))
-              return false;
+if (filterRef) {
+    // Si le filtre contient un slash, on fait une correspondance EXACTE
+    if (filterRef.includes('/')) {
+        if (d.ref.toLowerCase() !== filterRef) return false;
+    } else {
+        // Sinon, recherche partielle (contient la chaîne)
+        if (!d.ref.toLowerCase().includes(filterRef)) return false;
+    }
+}
             if (filterAnnee && d.annee !== filterAnnee) return false;
             if (filterCharge && d.charge_dossier !== filterCharge) return false;
 
@@ -7538,85 +7627,143 @@ document.getElementById('tableBody').addEventListener('change', function(e) {
         // MODIFIER cette fonction (ajouter les nouveaux cas)
         // REMPLACEZ la fonction mettreAJour existante par celle-ci :
 
-        async function mettreAJour(champ, valeur, dossierId) {
-          if (!isConnected) {
-            showSaving("error", "Non connecté");
-            return false;
-          }
+  async function mettreAJour(champ, valeur, dossierId) {
+    if (!isConnected) {
+        showSaving("error", "Non connecté");
+        return false;
+    }
+    const dateFields = [
+        'date_reception', 'date_reception_cd', 'date_reception_com',
+        'date_limite_depot', 'caution_date_emission', 'caution_date_recuperation',
+        'date_recuperation_retenue1', 'date_recuperation_retenue2',
+        'date_signature_pvrp', 'date_signature_pvrd'
+    ];
+    if (typeof valeur === 'string' && valeur === '' && dateFields.includes(champ)) {
+        valeur = null;
+    }
 
-          showSaving("start");
+    // ============================================================
+    // 🔒 CONSERVER LA POSITION AVANT SAUVEGARDE
+    // ============================================================
+    const wrapper = document.querySelector(".table-wrapper");
+    const scrollTopAvant = wrapper ? wrapper.scrollTop : 0;
 
-          try {
-            const { error } = await supabase
-              .from("dossiers")
-              .update({ [champ]: valeur })
-              .eq("id", dossierId);
+    const dossierAvant = dossiers.find(d => d.id === dossierId);
+    const refAvant = dossierAvant ? dossierAvant.ref : null;
 
-            if (error) throw error;
+    showSaving("start");
 
-            const dossier = dossiers.find((d) => d.id === dossierId);
-            if (dossier) {
-              dossier[champ] = valeur;
-              console.log(
-                `✅ Champ ${champ} mis à jour pour ${dossier.ref}: ${valeur}`,
-              );
-            }
+    try {
+        const { error } = await supabase
+            .from("dossiers")
+            .update({ [champ]: valeur })
+            .eq("id", dossierId);
 
-            // ============================================================
-            // ✅ DÉCLENCHER LA CRÉATION DE COMMANDE
-            // ============================================================
-            if (dossier) {
-              // CAS 1: Validation hiérarchique vient d'être cochée
-              if (champ === "validation_hierarchie" && valeur === true) {
-                console.log(
-                  `✅ Validation hiérarchique activée pour ${dossier.ref}`,
-                );
-                await detecterEtCreerCommande(dossier);
-              }
+        if (error) throw error;
 
-              // CAS 2: L'état passe à "commande" ou "clôturé" ET validation déjà TRUE
-              if (
-                champ === "etat" &&
-                (valeur === "commande" ||
-                  valeur === "clôturé" ||
-                  valeur === "traité")
-              ) {
-                if (dossier.validation_hierarchie === true) {
-                  console.log(
-                    `✅ État "${valeur}" avec validation OK pour ${dossier.ref}`,
-                  );
-                  await detecterEtCreerCommande(dossier);
-                }
-              }
+        // Mise à jour locale
+        const dossier = dossiers.find(d => d.id === dossierId);
 
-              // CAS 3: Réf commande ou montant ajouté après validation
-              if (
-                (champ === "ref_commande" || champ === "montant_commande") &&
-                dossier.validation_hierarchie === true
-              ) {
-                if (
-                  dossier.etat === "commande" ||
-                  dossier.etat === "clôturé" ||
-                  dossier.etat === "traité"
-                ) {
-                  console.log(`✅ Mise à jour commande pour ${dossier.ref}`);
-                  await detecterEtCreerCommande(dossier);
-                }
-              }
-            }
-            // ============================================================
+        if (dossier) {
+            dossier[champ] = valeur;
 
-            await applyFilters();
-            await appliquerFiltresCommandes();
-
-            showSaving("success");
-            return true;
-          } catch (error) {
-            console.error("❌ Erreur mise à jour:", error);
-            showSaving("error", error.message);
-            return false;
-          }
+            console.log(
+                `✅ Champ ${champ} mis à jour pour ${dossier.ref}: ${valeur}`
+            );
         }
+
+        // ============================================================
+        // CRÉATION DE COMMANDE
+        // ============================================================
+        if (dossier) {
+
+            if (
+                champ === "validation_hierarchie" &&
+                valeur === true
+            ) {
+                await detecterEtCreerCommande(dossier);
+            }
+
+            if (
+                champ === "etat" &&
+                (
+                    valeur === "commande" ||
+                    valeur === "clôturé" ||
+                    valeur === "traité"
+                )
+            ) {
+                if (dossier.validation_hierarchie === true) {
+                    await detecterEtCreerCommande(dossier);
+                }
+            }
+
+            if (
+                (
+                    champ === "ref_commande" ||
+                    champ === "montant_commande"
+                ) &&
+                dossier.validation_hierarchie === true
+            ) {
+                if (
+                    dossier.etat === "commande" ||
+                    dossier.etat === "clôturé" ||
+                    dossier.etat === "traité"
+                ) {
+                    await detecterEtCreerCommande(dossier);
+                }
+            }
+        }
+
+        // ============================================================
+        // 🔄 RAFRAÎCHISSEMENT
+        // ============================================================
+        await applyFilters();
+        await appliquerFiltresCommandes();
+
+        // ============================================================
+        // 🔒 RESTAURER LA POSITION
+        // ============================================================
+        requestAnimationFrame(() => {
+            const wrapperApres = document.querySelector(".table-wrapper");
+
+            if (wrapperApres) {
+                wrapperApres.scrollTop = scrollTopAvant;
+
+                // Deuxième restauration après recalcul des hauteurs
+                requestAnimationFrame(() => {
+                    wrapperApres.scrollTop = scrollTopAvant;
+                });
+            }
+
+            // ========================================================
+            // 🔎 RESTAURER LE FOCUS SUR LA LIGNE MODIFIÉE
+            // ========================================================
+            if (refAvant) {
+                const nouvelleLigne = document.querySelector(
+                    `#tableBody tr[data-ref="${CSS.escape(refAvant)}"]`
+                );
+
+                if (nouvelleLigne) {
+                    nouvelleLigne.scrollIntoView({
+                        block: "nearest",
+                        inline: "nearest",
+                        behavior: "instant"
+                    });
+                }
+            }
+        });
+
+        showSaving("success");
+        return true;
+
+    } catch (error) {
+
+        console.error("❌ Erreur mise à jour:", error);
+        showSaving("error", error.message);
+
+        return false;
+    }
+}
 
         async function ajouterRevision(dossierId, lotId = null) {
           console.log("📝 ajouterRevision appelée", { dossierId, lotId });
@@ -8416,23 +8563,24 @@ function renderTableHeader() {
     { id: 'client', label: 'Client' },
     { id: 'ref_client', label: 'Réf client' },
     { id: 'date_reception', label: 'Date réception' },
+     { id: 'date_reception_cd', label: 'Date réception CD' },
+      { id: 'date_limite_depot', label: 'Date limite dépôt' },
     { id: 'informations_client', label: 'Contact' },
     { id: 'type_consultation', label: 'Type consultation' },
     { id: 'consultation_alloti', label: 'Alloti' },
     { id: 'designation', label: 'Désignation' },
+    { id: 'nom_projet', label: 'Nom du projet' },
     { id: 'division', label: 'Division' },
     { id: 'sous_division', label: 'Sous-division' },
     { id: 'type_prestation', label: 'Type prestation' },
     { id: 'charge_dossier', label: 'Chargé' },
-    { id: 'date_reception_cd', label: 'Date réception CD' },
+    { id: 'etat', label: 'État' },
     { id: 'fournisseurs', label: 'Fournisseurs' },
     { id: 'proforma', label: 'Proforma' },
     { id: 'sofraico', label: 'Sofraico' },
     { id: 'marge_dossier', label: 'Marge' },
     { id: 'commission_partenaire', label: 'Commission' },
     { id: 'caution', label: 'Caution' },
-    { id: 'date_limite_depot', label: 'Date limite dépôt' },
-    { id: 'etat', label: 'État' },
     { id: 'ref_commande', label: 'Réf commande' },
     { id: 'date_reception_com', label: 'Date réception Com' },
     { id: 'montant_commande', label: 'Montant commande' },
@@ -8473,7 +8621,14 @@ function renderTableFiltre() {
     }
 
     // ✅ Initialiser rowHeights avec une valeur par défaut pour chaque ligne
-    rowHeights = new Array(allRowsData.length).fill(ROW_HEIGHT);
+    // Conserver les hauteurs déjà calculées
+const anciennesHauteurs = rowHeights || [];
+
+rowHeights = new Array(allRowsData.length);
+
+for (let i = 0; i < allRowsData.length; i++) {
+    rowHeights[i] = anciennesHauteurs[i] || ROW_HEIGHT;
+}
 
     renderTableHeader();
     // 2. Mettre à jour les statistiques miniatures (inchangé)
@@ -9009,23 +9164,24 @@ function onScrollHandler() {
             "client",
             "ref_client",
             "date_reception",
+            "date_reception_cd", // ← NOUVEAU
+            "date_limite_depot",
             "informations_client",
             "type_consultation",
             "consultation_alloti",
             "designation",
+            "nom_projet",
             "division",
             "sous_division",
             "type_prestation",
             "charge_dossier",
-            "date_reception_cd", // ← NOUVEAU
+             "etat",
             "fournisseurs",
             "proforma",
             'sofraico',
             "marge_dossier",
             "commission_partenaire",
             "caution",
-            "date_limite_depot",
-            "etat",
             "ref_commande",
             "date_reception_com", // ← NOUVEAU
             "montant_commande",
@@ -9574,6 +9730,21 @@ function onScrollHandler() {
               }
               td.appendChild(container);
             }
+
+            // Dans renderLigne (après le bloc "division")
+else if (colId === "nom_projet") {
+  let inp = document.createElement("input");
+  inp.value = dossier.nom_projet || "";
+  inp.placeholder = "Nom du projet";
+  inp.style.width = "210px";
+  inp.classList.add("input-smart");
+  if (isParentBlockedFields || !peutModifier(dossier, "nom_projet")) {
+    inp.disabled = true;
+  } else {
+    inp.onchange = (e) => mettreAJour("nom_projet", e.target.value, dossier.id);
+  }
+  td.appendChild(inp);
+}
             // ==================== DIVISION ====================
             else if (colId === "division") {
               let sel = document.createElement("select");
